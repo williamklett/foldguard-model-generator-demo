@@ -2,4 +2,4 @@
 
 Protein annotation workspace.
 
-[Open the demo](https://williamklett.github.io/foldguard-model-generator-demo/)
+[Open the demo](https://williamklett.github.io/foldguard-model-generator-demo/index.html)
