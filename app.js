@@ -7,7 +7,7 @@ let token = sessionStorage.getItem("foldguard-service-token") || "";
 let connected = false, profiles = [], runs = [], checks = {}, currentRun = null, activeProfile = null;
 let polling = false, inspecting = false, busy = false, selectedLoss = "", previousView = null;
 const files = {train:null,test:null};
-let summaryTimer;
+let summaryTimer, renderedResultRun = null;
 
 function notice(message, error=false) {
   $("notice").textContent = message;
@@ -162,6 +162,8 @@ function renderMetrics(view){
   const r=view.result;
   $("metrics-empty").classList.toggle("hidden",!!r);$("metrics-content").classList.toggle("hidden",!r);
   if(!r)return;
+  if(renderedResultRun===view.id)return;
+  renderedResultRun=view.id;
   const m=r.metrics,d=r.dataset,classes=d.classes;
   $("metrics-content").innerHTML=`<div class="metric-grid"><div><small>AUROC${classes.length>2?" · macro OVR":""}</small><strong>${m.auroc.toFixed(4)}</strong></div><div><small>Balanced accuracy</small><strong>${(m.balanced_accuracy*100).toFixed(1)}<span class="small">%</span></strong></div><div><small>Macro F1</small><strong>${m.macro_f1.toFixed(3)}</strong></div><div><small>Average precision</small><strong>${m.average_precision.toFixed(3)}</strong></div></div><div class="metric-note">${d.test_rows.toLocaleString()} held-out proteins · ${esc(m.auroc_definition)}<br>${d.group_disjoint?"✓ Supplied family/groups are disjoint":"Family-disjoint evaluation not established"}<br>${r.training_limit_reached?"Training reached its configured limit":"Training complete"}</div><div class="curve-controls"><label>ROC curve<select id="roc-class">${classes.map((c,i)=>`<option value="${esc(c)}"${i===(classes.length===2?1:0)?" selected":""}>${esc(c)}</option>`).join("")}</select></label></div><div id="roc-chart"></div><details class="result-details"><summary>Confusion matrix &amp; class metrics</summary><div class="table-wrap"><table><thead><tr><th>Actual ↓ / predicted →</th>${classes.map(c=>`<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>${m.confusion_matrix.map((row,i)=>`<tr><th>${esc(classes[i])}</th>${row.map(n=>`<td>${n}</td>`).join("")}</tr>`).join("")}</tbody></table></div><div class="table-wrap"><table><thead><tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1</th><th>n</th></tr></thead><tbody>${m.per_class.map(c=>`<tr><td>${esc(c.label)}</td><td>${c.precision.toFixed(3)}</td><td>${c.recall.toFixed(3)}</td><td>${c.f1.toFixed(3)}</td><td>${c.support}</td></tr>`).join("")}</tbody></table></div><p class="table-caption">Predictions use the largest class logit. Scores are not independently calibrated.</p></details><div class="result-warning">${r.limitations.map(esc).join("<br>")}</div><button class="primary" id="download-model">Download evaluation report ↓</button>`;
   const roc=()=>{$("roc-chart").innerHTML=plot([{color:"#6f5fa5",points:m.curves[$("roc-class").value].roc}],{xLabel:"False positive rate",yLabel:"True positive rate",diagonal:true});};
