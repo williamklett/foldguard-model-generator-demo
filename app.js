@@ -4,10 +4,14 @@ const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;",
 const localPage = ["localhost","127.0.0.1"].includes(location.hostname);
 const base = localPage ? location.origin : "http://127.0.0.1:8773";
 let token = sessionStorage.getItem("foldguard-service-token") || "";
-let connected = false, profiles = [], runs = [], checks = {}, currentRun = null, activeProfile = null;
-let polling = false, inspecting = false, busy = false, selectedLoss = "", previousView = null;
+let connected = false, profiles = [], runs = [], checks = {}, stores = [], currentRun = null, activeProfile = null;
+let polling = false, busy = false, selectedLoss = "", previousView = null;
 const files = {train:null,test:null};
-let summaryTimer, renderedResultRun = null;
+let summaryTimer, renderedResultRun = null, validationRevision = 0;
+const datasetRevision = {train:0,test:0}, pendingFiles = {train:null,test:null};
+let storageSplit = "train", storageSession = 0, storageRequest = 0, storageNext = null, storageRows = [], storageLoading = false;
+let pairingWindow = null, pairingState = "", pairingTimer = null, importingDatasets = 0;
+const randomID = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), b=>b.toString(16).padStart(2,"0")).join("");
 
 function notice(message, error=false) {
   $("notice").textContent = message;
@@ -27,9 +31,9 @@ function connectionUI(value) {
   connected=value;
   $("connection-dot").classList.toggle("online",value);
   $("side-dot").classList.toggle("online",value);
-  $("connection-label").textContent=value?"Compute service connected":"Connect compute service";
+  $("connection-label").textContent=value?"Workspace connected":"Connect this computer";
   $("side-status").textContent=value?"Companion connected":"Companion offline";
-  $("launch-run").disabled=!value||busy;
+  $("launch-run").disabled=!value||busy||importingDatasets>0||!!pendingFiles.train||!!pendingFiles.test;
   $("local-token-tools").classList.toggle("hidden",!localPage||!value);
 }
 function showConnection() {
@@ -38,14 +42,13 @@ function showConnection() {
   $("connection-dialog").showModal();
 }
 function changeView(name) {
-  for(const view of ["builder","runs","compute"])$(view+"-view").classList.toggle("hidden",view!==name);
+  for(const view of ["builder","runs"])$(view+"-view").classList.toggle("hidden",view!==name);
   document.querySelectorAll("[data-view]").forEach(b=>b.classList.toggle("active",b.dataset.view===name));
-  $("page-title").textContent={builder:"Model Generator",runs:"Model runs",compute:"Compute"}[name];
-  if(name==="compute")renderCompute();
+  $("page-title").textContent={builder:"Model Generator",runs:"Model runs"}[name];
   if(name==="runs")renderRuns();
 }
 function populateColumns() {
-  const fields = files.train?.inspection?.columns || files.test?.inspection?.columns;
+  const fields = files.train?.columns || files.test?.columns;
   if(!fields)return;
   const definitions=[
     ["sequence-column","",/^(sequence|protein_sequence|seq)$/i],
@@ -60,49 +63,143 @@ function populateColumns() {
   if(!$("run-name").value&&$("label-column").value)$("run-name").placeholder=$("label-column").value+" · v1";
   scheduleSummary();
 }
-async function inspectFiles(){
-  if(!connected||inspecting)return;
-  inspecting=true;
-  try{
-    for(const split of ["train","test"]){
-      if(!files[split]||files[split].inspection)continue;
-      const result=await api("/api/inspect",{text:files[split].text});
-      files[split].inspection=result;
-      $(split+"-detail").textContent=result.rows.toLocaleString()+" proteins · "+result.columns.length+" columns";
-    }
-    populateColumns();
-  }catch(error){notice(error.message,true);}finally{inspecting=false;}
+function datasetChanged() {
+  validationRevision++;
+  clearTimeout(summaryTimer);
+  $("dataset-summary").classList.add("hidden");
+  populateColumns();
 }
+function acceptDataset(split, data) {
+  files[split]=data;
+  $(split+"-filename").textContent=data.name;
+  $(split+"-detail").textContent=data.rows.toLocaleString()+" proteins · "+data.columns.length+" columns";
+  $(split+"-drop").classList.add("filled");
+  datasetChanged();
+}
+async function uploadPending(split) {
+  const entry=pendingFiles[split];
+  if(!entry||!connected||entry.uploading)return;
+  entry.uploading=true;connectionUI(connected);
+  try{
+    const text=await entry.file.text();
+    if(pendingFiles[split]!==entry)return;
+    const data=await api("/api/datasets/upload",{text,name:entry.file.name});
+    if(pendingFiles[split]!==entry||datasetRevision[split]!==entry.revision)return;
+    pendingFiles[split]=null;acceptDataset(split,data);
+  }catch(error){if(pendingFiles[split]===entry){$(split+"-detail").textContent="Import failed · choose a file again";notice(error.message,true);pendingFiles[split]=null;}}
+  finally{entry.uploading=false;connectionUI(connected);}
+}
+async function uploadPendingFiles(){await Promise.all(["train","test"].map(uploadPending));}
 async function loadFile(split,file){
   if(!file)return;
   if(file.size>24*1024**2){notice("Choose a file smaller than 24 MB.",true);return;}
-  files[split]={name:file.name,text:await file.text(),inspection:null};
+  const revision=++datasetRevision[split];
+  files[split]=null;pendingFiles[split]={file,revision,uploading:false};datasetChanged();
   $(split+"-filename").textContent=file.name;
-  $(split+"-detail").textContent=connected?"Checking table…":"Connect the service to inspect this file";
-  $(split+"-drop").classList.add("filled");
-  clearNotice();
-  await inspectFiles();
+  $(split+"-detail").textContent=connected?"Importing table…":"Connect this computer to import this file";
+  $(split+"-drop").classList.add("filled");clearNotice();await uploadPending(split);
 }
 function mapping(){return {sequence:$("sequence-column").value,label:$("label-column").value,id:$("id-column").value,group:$("group-column").value};}
-function scheduleSummary(){clearTimeout(summaryTimer);summaryTimer=setTimeout(validateSummary,300);}
+function datasetPayload(){return {train_ref:files.train.id,test_ref:files.test.id,mapping:mapping()};}
+function scheduleSummary(){validationRevision++;clearTimeout(summaryTimer);summaryTimer=setTimeout(validateSummary,300);}
 async function validateSummary(){
-  if(!connected||!files.train||!files.test||!mapping().sequence||!mapping().label)return;
+  if(!connected||!files.train?.id||!files.test?.id||!mapping().sequence||!mapping().label)return;
+  const revision=validationRevision;
   try{
-    const data=await api("/api/validate",{train:files.train.text,test:files.test.text,mapping:mapping()});
+    const data=await api("/api/validate",datasetPayload());
+    if(revision!==validationRevision)return;
     $("dataset-summary").innerHTML=`<div class="summary-grid"><span><strong>${data.train_rows.toLocaleString()}</strong>training proteins</span><span><strong>${data.test_rows.toLocaleString()}</strong>test proteins</span><span><strong>${data.classes.length}</strong>classes</span></div><div>${data.group_disjoint?"✓ Supplied groups are disjoint":"No family/group holdout supplied"} · Exact train/test duplicates excluded</div><div class="warning-text">${data.homology_screened?"":"Sequence similarity between sets is not screened."}</div>`;
     $("dataset-summary").classList.remove("hidden");
-  }catch(error){$("dataset-summary").innerHTML=`<div class="warning-text">${esc(error.message)}</div>`;$("dataset-summary").classList.remove("hidden");}
+  }catch(error){if(revision===validationRevision){$("dataset-summary").innerHTML=`<div class="warning-text">${esc(error.message)}</div>`;$("dataset-summary").classList.remove("hidden");}}
+}
+function storageStatus(message,error=false){$("storage-status").textContent=message;$("storage-status").classList.toggle("error",error);}
+function renderStores(){
+  const current=$("storage-select").value;
+  $("storage-select").innerHTML='<option value="">Choose a connection</option>'+stores.map(p=>`<option value="${esc(p.id)}">${esc(p.name)} · ${esc(p.bucket)}</option>`).join("");
+  $("storage-select").value=stores.some(p=>p.id===current)?current:(stores[0]?.id||"");
+}
+function changeStorageTab(name){
+  for(const tab of ["browse","url"]){const active=tab===name;$("storage-"+tab).classList.toggle("hidden",!active);$("storage-"+tab+"-tab").classList.toggle("active",active);$("storage-"+tab+"-tab").setAttribute("aria-selected",String(active));}
+}
+function resetStorageListing(){
+  storageRequest++;storageRows=[];storageNext=null;storageLoading=false;
+  $("storage-more").classList.add("hidden");$("storage-list-button").disabled=false;
+  $("storage-objects").innerHTML='<p class="small">Browse a folder to choose a CSV or TSV dataset.</p>';
+}
+function openStorage(split){
+  if(!connected){notice("Connect this computer to browse your storage.",true);showConnection();return;}
+  storageSplit=split;storageSession++;resetStorageListing();renderStores();changeStorageTab("browse");
+  $("storage-dialog-title").textContent="Choose your "+(split==="train"?"training":"test")+" set.";
+  $("dataset-url").value="";$("storage-prefix").value=stores.find(p=>p.id===$("storage-select").value)?.prefix||"";
+  $("storage-settings").open=!stores.length;storageStatus("Storage credentials stay with your connector.");
+  $("storage-dialog").showModal();
+  if(stores.length)listStorage(false);
+}
+function renderStorageRows(){
+  $("storage-objects").innerHTML=storageRows.length?storageRows.map((o,i)=>`<button type="button" class="storage-object" data-storage-object="${i}" ${o.supported?"":"disabled"}><span><strong>${esc(o.key)}</strong><small>${Number.isFinite(o.size)?(o.size/1024).toFixed(1)+" KB":""}${o.last_modified?" · "+esc(o.last_modified):""}</small></span><span>${o.supported?"Select ↗":o.size===0?"Empty file":o.size>24*1024**2?"Exceeds 24 MB":"Unavailable"}</span></button>`).join(""):'<p class="small">No files found in this folder.</p>';
+  document.querySelectorAll("[data-storage-object]").forEach(b=>b.addEventListener("click",()=>importStorageObject(storageRows[Number(b.dataset.storageObject)])));
+  $("storage-more").classList.toggle("hidden",!storageNext);
+}
+async function listStorage(more=false){
+  const storeID=$("storage-select").value;
+  if(!storeID){storageStatus("Add or select a storage connection first.",true);return;}
+  if(storageLoading)return;
+  const request=++storageRequest,session=storageSession,prefix=$("storage-prefix").value;
+  storageLoading=true;$("storage-list-button").disabled=true;$("storage-more").disabled=true;
+  storageStatus("Reading your storage…");
+  try{
+    const result=await api("/api/storage/objects",{store_id:storeID,prefix,...(more&&storageNext?{continuation_token:storageNext}:{})});
+    if(request!==storageRequest||session!==storageSession)return;
+    storageRows=more?[...storageRows,...result.objects]:result.objects;storageNext=result.next_token;renderStorageRows();
+    storageStatus("Choose a dataset to import. Files are read directly by your connector.");
+  }catch(error){if(request===storageRequest&&session===storageSession)storageStatus(error.message,true);}
+  finally{if(request===storageRequest){storageLoading=false;$("storage-list-button").disabled=false;$("storage-more").disabled=false;}}
+}
+async function importDataset(body){
+  const split=storageSplit,session=storageSession,revision=++datasetRevision[split];
+  pendingFiles[split]=null;importingDatasets++;connectionUI(connected);
+  storageStatus("Importing and checking your dataset…");
+  document.querySelectorAll(".storage-object").forEach(b=>b.disabled=true);$("import-url").disabled=true;
+  try{
+    const data=await api("/api/datasets/import",body);
+    if(session!==storageSession||revision!==datasetRevision[split])return;
+    acceptDataset(split,data);$("dataset-url").value="";$("storage-dialog").close();clearNotice();
+  }catch(error){if(session===storageSession)storageStatus(error.message,true);}
+  finally{importingDatasets--;connectionUI(connected);if(session===storageSession){$("import-url").disabled=false;renderStorageRows();}}
+}
+function importStorageObject(object){return importDataset({store_id:$("storage-select").value,key:object.key,etag:object.etag,selection_id:object.selection_id});}
+function storageCredentialsUI(){const env=$("store-auth").value==="env";document.querySelectorAll(".store-env").forEach(el=>el.classList.toggle("hidden",!env));document.querySelectorAll(".store-profile").forEach(el=>el.classList.toggle("hidden",env));}
+async function finishConnection(value){
+  token=value;sessionStorage.setItem("foldguard-service-token",token);await refresh();
+  if(!connected)throw new Error("The connector did not accept this connection.");
+  $("service-token").value=token;if($("connection-dialog").open)$("connection-dialog").close();clearNotice();await uploadPendingFiles();scheduleSummary();
+}
+async function startPairing(){
+  if(localPage){try{const r=await fetch(base+"/api/bootstrap");if(!r.ok)throw new Error();await finishConnection((await r.json()).token);}catch(error){$("pair-status").textContent="Start your connector and try again.";}return;}
+  pairingState=randomID();clearTimeout(pairingTimer);pairingWindow=window.open(base+"/connect?state="+encodeURIComponent(pairingState),"foldguard-connect-"+pairingState,"popup,width=600,height=680");
+  $("pair-status").textContent=pairingWindow?"Allow this site in the local window. If it cannot open, start your connector and try again.":"Your browser blocked the local window. Allow popups for this site and try again.";
+  pairingTimer=setTimeout(()=>{pairingState="";$("pair-status").textContent="The connection window expired. Start your connector and try again.";},180000);
+}
+window.addEventListener("message",async event=>{
+  if(event.origin!==location.origin||event.source!==pairingWindow||!pairingState||event.data?.type!=="foldguard:paired"||event.data.state!==pairingState||typeof event.data.token!=="string")return;
+  clearTimeout(pairingTimer);pairingState="";
+  try{await finishConnection(event.data.token);pairingWindow?.close();pairingWindow=null;}catch(error){$("pair-status").textContent="Could not connect. Start the connector and try again.";notice(error.message,true);}
+});
+function receivePairingFragment(){
+  const fragment=new URLSearchParams(location.hash.slice(1));if(!fragment.has("connect_token"))return false;
+  const value=fragment.get("connect_token"),state=fragment.get("state");history.replaceState(null,"",location.pathname+location.search);
+  if(!/^[a-f0-9]{32}$/.test(state||"")||!value||value.length>256)return false;
+  token=value;sessionStorage.setItem("foldguard-service-token",token);
+  if(window.opener){try{window.opener.postMessage({type:"foldguard:paired",state,token:value},location.origin);setTimeout(()=>window.close(),200);}catch(error){/* This tab can connect independently. */}}
+  return true;
 }
 function selectedCompute(){return document.querySelector('input[name="compute"]:checked').value;}
 function renderCompute(){
-  const fallback=[{id:"adroit",name:"Adroit",kind:"slurm"},{id:"ssh-gpu",name:"SSH GPU",kind:"ssh"},{id:"local",name:"This machine",kind:"local"}];
-  $("compute-list").innerHTML=(profiles.length?profiles:fallback).map(p=>`<section class="panel compute-summary"><span class="tiny-label">${p.kind==="slurm"?"CLUSTER / SLURM":p.kind==="ssh"?"REMOTE / SSH":"LOCAL WORKER"}</span><h2>${esc(p.name)}</h2><p>${esc(p.host||"Add your GPU hostname")}<br>${checks[p.id]?.ok?"✓ Connection checked":p.assets_configured?"Assets configured · connection not verified":"Configure runtime and assets"}</p><button class="secondary" data-configure="${p.id}">Configure ↗</button></section>`).join("");
   document.querySelectorAll("[data-compute-status]").forEach(el=>{
     const p=profiles.find(p=>p.id===el.dataset.computeStatus),check=checks[el.dataset.computeStatus];
     el.textContent=check?.ok?"● Connection checked":p?.assets_configured?"Not checked":"Configure assets";
     el.classList.toggle("ready",!!check?.ok);
   });
-  document.querySelectorAll("[data-configure]").forEach(b=>b.addEventListener("click",()=>configure(b.dataset.configure)));
 }
 function configure(identifier){
   if(!connected){notice("Connect the companion service to configure compute.",true);showConnection();return;}
@@ -192,7 +289,7 @@ function renderMonitor(view){
 async function refreshRun(){if(!currentRun||!connected)return;const view=await api("/api/runs/"+currentRun);renderMonitor(view);}
 async function refresh(){
   if(polling||!token)return;polling=true;
-  try{const data=await api("/api/state",undefined,{timeout:15000});profiles=data.profiles;runs=data.runs;checks=data.checks;connectionUI(true);renderCompute();renderRuns();await refreshRun();}
+  try{const data=await api("/api/state",undefined,{timeout:15000});profiles=data.profiles;runs=data.runs;checks=data.checks;stores=data.stores||[];connectionUI(true);renderCompute();renderRuns();await refreshRun();}
   catch(error){connectionUI(false);if(currentRun)$("progress-caption").textContent="Companion unavailable. Reconnect to refresh this run.";}
   finally{polling=false;}
 }
@@ -207,17 +304,39 @@ for(const split of ["train","test"]){
 }
 for(const id of ["sequence-column","label-column","id-column","group-column"])$(id).addEventListener("change",scheduleSummary);
 document.querySelectorAll('input[name="compute"]').forEach(input=>input.addEventListener("change",()=>{document.querySelectorAll(".compute-card").forEach(c=>c.classList.toggle("selected",c.querySelector("input").checked));}));
-for(const id of ["connection-button","open-connection","connection-from-compute"])$(id).addEventListener("click",showConnection);
+for(const id of ["connection-button","open-connection"])$(id).addEventListener("click",showConnection);
+$("pair-service").addEventListener("click",startPairing);
+document.querySelectorAll("[data-storage-split]").forEach(b=>b.addEventListener("click",()=>openStorage(b.dataset.storageSplit)));
+$("storage-browse-tab").addEventListener("click",()=>changeStorageTab("browse"));
+$("storage-url-tab").addEventListener("click",()=>changeStorageTab("url"));
+$("storage-dialog").addEventListener("close",()=>{storageSession++;resetStorageListing();$("import-url").disabled=false;$("dataset-url").value="";});
+$("add-storage").addEventListener("click",()=>{$("storage-settings").open=true;$("store-name").focus();});
+$("storage-select").addEventListener("change",()=>{resetStorageListing();$("storage-prefix").value=stores.find(p=>p.id===$("storage-select").value)?.prefix||"";if($("storage-select").value)listStorage();});
+$("storage-prefix").addEventListener("input",resetStorageListing);
+$("storage-list-form").addEventListener("submit",e=>{e.preventDefault();listStorage(false);});
+$("storage-more").addEventListener("click",()=>listStorage(true));
+$("store-auth").addEventListener("change",storageCredentialsUI);
+$("store-provider").addEventListener("change",()=>{const r2=$("store-provider").value==="r2";$("store-region").value=r2?"auto":"us-east-1";$("store-access_key_env").value=r2?"R2_ACCESS_KEY_ID":"AWS_ACCESS_KEY_ID";$("store-secret_key_env").value=r2?"R2_SECRET_ACCESS_KEY":"AWS_SECRET_ACCESS_KEY";});
+$("storage-form").addEventListener("submit",async e=>{
+  e.preventDefault();const button=$("save-storage");button.disabled=true;
+  const body={id:"store-"+randomID(),name:$("store-name").value.trim(),provider:$("store-provider").value};
+  for(const field of ["endpoint_url","bucket","prefix","region"])body[field]=$("store-"+field).value.trim();
+  if($("store-auth").value==="profile")body.aws_profile=$("store-aws_profile").value.trim()||"default";
+  else for(const field of ["access_key_env","secret_key_env","session_token_env"])body[field]=$("store-"+field).value.trim();
+  try{const result=await api("/api/storage/profile",body);stores=[...stores.filter(p=>p.id!==result.profile.id),result.profile];renderStores();$("storage-select").value=result.profile.id;$("storage-prefix").value=result.profile.prefix||"";$("storage-settings").open=false;resetStorageListing();await listStorage();}
+  catch(error){storageStatus(error.message,true);}finally{button.disabled=false;}
+});
+$("storage-url-form").addEventListener("submit",e=>{e.preventDefault();const value=$("dataset-url").value.trim();try{if(new URL(value).protocol!=="https:")throw new Error();importDataset({url:value});}catch(error){storageStatus("Enter a direct HTTPS download link.",true);}});
 $("configure-compute").addEventListener("click",()=>configure(selectedCompute()));
 $("copy-token").addEventListener("click",async()=>{try{await navigator.clipboard.writeText(token);$("copy-token").textContent="Copied ✓";}catch(error){$("service-token").type="text";$("service-token").select();}});
 $("connect-service").addEventListener("click",async()=>{
   const button=$("connect-service");button.disabled=true;
-  try{token=$("service-token").value.trim();await api("/api/state",undefined,{timeout:15000});sessionStorage.setItem("foldguard-service-token",token);connectionUI(true);$("connection-dialog").close();clearNotice();await refresh();await inspectFiles();}
+  try{token=$("service-token").value.trim();await api("/api/state",undefined,{timeout:15000});sessionStorage.setItem("foldguard-service-token",token);connectionUI(true);$("connection-dialog").close();clearNotice();await refresh();await uploadPendingFiles();}
   catch(error){notice("Could not connect. Start the companion service, check the token, and allow local-network access if your browser requests it. "+error.message,true);}
   finally{button.disabled=false;}
 });
 $("test-compute").addEventListener("click",async()=>{
-  const button=$("test-compute");button.disabled=true;$("profile-check").className="profile-check";$("profile-check").textContent="Checking SSH, dependencies, and model assets…";
+  const button=$("test-compute");button.disabled=true;$("profile-check").className="profile-check";$("profile-check").textContent="Checking compute connection and model assets…";
   try{const result=await api("/api/check",profileForm());checks[activeProfile.id]=result;$("profile-check").textContent=(result.ok?"✓ ":"")+result.message+(result.host?" · "+result.host:"");$("profile-check").classList.toggle("error",!result.ok);renderCompute();}
   catch(error){$("profile-check").textContent=error.message;$("profile-check").classList.add("error");}
   finally{button.disabled=false;}
@@ -226,9 +345,9 @@ $("compute-form").addEventListener("submit",async e=>{
   e.preventDefault();try{await api("/api/profile",profileForm());$("compute-dialog").close();await refresh();notice("Compute profile saved. Test its connection before launching.");}catch(error){$("profile-check").textContent=error.message;$("profile-check").classList.add("error");}
 });
 $("launch-run").addEventListener("click",async()=>{
-  if(!connected){showConnection();return;}if(!files.train||!files.test){notice("Add a training set and a test set first.",true);return;}
+  if(!connected){showConnection();return;}if(importingDatasets||pendingFiles.train||pendingFiles.test){notice("Wait for dataset imports to finish.",true);return;}if(!files.train?.id||!files.test?.id){notice("Choose a training set and a test set first.",true);return;}
   busy=true;connectionUI(true);$("launch-run").textContent="Checking & launching…";clearNotice();
-  try{const response=await api("/api/runs",{train:files.train.text,test:files.test.text,mapping:mapping(),
+  try{const response=await api("/api/runs",{...datasetPayload(),
     annotation:mapping().label,name:$("run-name").value.trim()||(mapping().label+" · v1"),compute:selectedCompute()});
     currentRun=response.id;previousView=null;selectedLoss="";await refresh();notice("Run launched. You can follow its progress here or return to it from Model runs.");}
   catch(error){notice(error.message,true);}finally{busy=false;$("launch-run").innerHTML='Build &amp; evaluate <span>↗</span>';connectionUI(connected);}
@@ -237,13 +356,13 @@ $("loss-series").addEventListener("change",()=>{selectedLoss=$("loss-series").va
 $("stop-run").addEventListener("click",async()=>{if(!currentRun)return;try{const result=await api("/api/runs/"+currentRun+"/cancel",{});notice(result.message||"Stop requested.");}catch(error){notice(error.message,true);}});
 
 async function initialize(){
-  connectionUI(false);renderCompute();renderRuns();
+  receivePairingFragment();connectionUI(false);renderCompute();renderRuns();
   if(localPage){
     try{const r=await fetch(base+"/api/bootstrap");const data=await r.json();token=data.token;sessionStorage.setItem("foldguard-service-token",token);}
     catch(error){notice("Start the companion service to use this interface.",true);}
   }
   await refresh();
-  if(!connected&&!localPage)notice("Connect the local companion service to configure compute and build models. Contact your Foldguard operator for the companion service.");
+  if(!connected&&!localPage)notice("Connect the local companion service to configure compute and build models. Get the private connector installer from your Foldguard operator, then connect this computer.");
   setInterval(()=>{if(!document.hidden)refresh();},4000);
   document.addEventListener("visibilitychange",()=>{if(!document.hidden)refresh();});
 }
