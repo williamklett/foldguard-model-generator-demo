@@ -104,7 +104,7 @@ function taskTypeHelp(){
   const continuous=taskType()==="regression";
   $("annotation-type-badge").textContent=continuous?"Continuous value":"Discrete categories";
   $("dataset-template").href=continuous?"./regression-train-template.csv":"./train-template.csv";
-  $("annotation-type-help").textContent=continuous?(connected&&!supportsTask()?"Update your connector to use continuous values.":"Predict a numeric measurement. Rows with blank annotations are excluded; populated values must be finite numbers. Include at least 10 labeled training and two labeled test proteins."):"Predict a category such as location or function. Rows with blank annotations are excluded. Include at least five labeled training proteins per category.";
+  $("annotation-type-help").textContent=continuous?(connected&&!supportsTask()?"Update your connector to use continuous values.":"Predict a numeric measurement. Rows with blank annotations are excluded; populated values must be finite numbers. Include at least two labeled training proteins with varying values and one labeled test protein."):"Predict a category such as location or function. Rows with blank annotations are excluded. Include at least two training classes and one labeled test protein.";
 }
 function updateTaskType(){
   taskTypeHelp();
@@ -112,10 +112,24 @@ function updateTaskType(){
 }
 function datasetPayload(){return {train_ref:files.train.id,test_ref:files.test.id,mapping:mapping(),task_type:taskType(),compute:selectedCompute()};}
 function scheduleSummary(){validationRevision++;readyValidationID="";connectionUI(connected);clearTimeout(summaryTimer);summaryTimer=setTimeout(validateSummary,300);}
+function separationSummary(data){
+  const lines=[];
+  if(data.exact_sequence_disjoint===true)lines.push("✓ No identical proteins shared between training and test");
+  else if(data.exact_sequence_disjoint===false)lines.push('<span class="warning-text">Identical proteins occur in both training and test.</span>');
+  if(data.group_disjoint===true)lines.push("✓ Supplied groups are disjoint");
+  else if(data.group_disjoint===false)lines.push(`<span class="warning-text">${data.group_column?"Supplied groups overlap between training and test.":"Group separation is not established."}</span>`);
+  return lines.join("<br>");
+}
+function evaluationWarnings(data,extra=[]){
+  const messages=[...(Array.isArray(data.warnings)?data.warnings:[]),...(Array.isArray(extra)?extra:[])];
+  if(data.exact_sequence_disjoint===false)messages.push("Training and test share identical proteins; scores describe this supplied test set and may be optimistic.");
+  if(data.group_disjoint===false&&data.group_column)messages.push("Training and test share groups; performance on unseen groups is not established.");
+  if(data.homology_screened!==true)messages.push("Sequence similarity between sets is not screened.");
+  return [...new Set(messages.filter(message=>typeof message==="string"&&message))].map(esc).join("<br>");
+}
 async function validateSummary(){
   if(!connected||!selectedCompute()||!backgroundDatasetImports||!files.train?.id||!files.test?.id||files.train.kind==="fasta"||files.test.kind==="fasta"||!mapping().sequence||!mapping().label)return;
   if(!supportsTask()){$("dataset-summary").innerHTML='<div class="warning-text">Update your connector to use continuous values.</div>';$("dataset-summary").classList.remove("hidden");return;}
-  if(files.train.curation&&files.test.curation&&files.train.curation.protocol!==files.test.curation.protocol){$("dataset-summary").textContent="Choose training and test sets with the same cluster holdout.";$("dataset-summary").classList.remove("hidden");return;}
   const revision=validationRevision;
   try{
     $("dataset-summary").textContent="Checking the datasets on your compute…";$("dataset-summary").classList.remove("hidden");
@@ -136,11 +150,13 @@ async function validateSummary(){
     const extra=continuous?`<span><strong>${esc(numberText(data.target_summary.train.min))}–${esc(numberText(data.target_summary.train.max))}</strong>training value range</span>`:`<span><strong>${data.classes.length}</strong>classes</span>`;
     const target=continuous?`<div class="target-summary">Test value range: ${esc(numberText(data.target_summary.test.min))} to ${esc(numberText(data.target_summary.test.max))}<br>Training mean: ${esc(numberText(data.target_summary.train.mean))} · Standard deviation: ${esc(numberText(data.target_summary.train.std))}</div>`:"";
     const countLines=[];
-    for(const [counts,label] of [[data.source_rows,"Source rows"],[data.excluded_unlabeled,"Excluded for blank annotations"],[data.excluded_duplicates,"Consolidated identical labeled proteins"]]){
+    for(const [counts,label] of [[data.source_rows,"Source rows"],[data.excluded_unlabeled,"Excluded for blank annotations"]]){
       if(Number.isSafeInteger(counts?.train)&&counts.train>=0&&Number.isSafeInteger(counts?.test)&&counts.test>=0)countLines.push(`${label}: ${counts.train.toLocaleString()} training · ${counts.test.toLocaleString()} test`);
     }
+    const duplicates=data.excluded_duplicates;
+    if(Number.isSafeInteger(duplicates?.train)&&duplicates.train>=0&&Number.isSafeInteger(duplicates?.test)&&duplicates.test>=0&&(duplicates.train||duplicates.test))countLines.push(`Consolidated identical labeled proteins: ${duplicates.train.toLocaleString()} training · ${duplicates.test.toLocaleString()} test`);
     const inputCounts=countLines.length?`<div class="target-summary">${countLines.join("<br>")}</div>`:"";
-    $("dataset-summary").innerHTML=`<div class="summary-grid${continuous?" numeric-summary":""}"><span><strong>${data.train_rows.toLocaleString()}</strong>training proteins</span><span><strong>${data.test_rows.toLocaleString()}</strong>test proteins</span>${extra}</div>${inputCounts}${target}<div>${data.group_disjoint?"✓ Supplied groups are disjoint":"No family/group holdout supplied"} · Exact train/test duplicates excluded</div><div class="warning-text">${data.homology_screened?"":"Sequence similarity between sets is not screened."}</div>`;
+    $("dataset-summary").innerHTML=`<div class="summary-grid${continuous?" numeric-summary":""}"><span><strong>${data.train_rows.toLocaleString()}</strong>training proteins</span><span><strong>${data.test_rows.toLocaleString()}</strong>test proteins</span>${extra}</div>${inputCounts}${target}<div>${separationSummary(data)}</div><div class="warning-text">${evaluationWarnings(data)}</div>`;
     $("dataset-summary").classList.remove("hidden");readyValidationID=queued.id;connectionUI(connected);
   }catch(error){if(revision===validationRevision){$("dataset-summary").innerHTML=`<div class="warning-text">${esc(error.message)}</div>`;$("dataset-summary").classList.remove("hidden");}}
 }
@@ -695,7 +711,7 @@ function regressionMetrics(r){
   const m=r.metrics,d=r.dataset,baseline=m.baseline||r.baseline;
   const cards=[["RMSE",m.rmse],["Mean absolute error",m.mae],["R²",m.r2],["Pearson correlation",m.pearson]].map(([label,value])=>`<div><small>${label}</small><strong${Number.isFinite(value)?"":' class="undefined-metric"'}>${esc(numberText(value))}</strong></div>`).join("");
   const comparison=baseline?`<details class="result-details"><summary>Training-mean baseline</summary><p class="table-caption">Predicting the training-set mean for every test protein.</p><div class="table-wrap"><table><thead><tr><th>Metric</th><th>Your model</th><th>Baseline</th></tr></thead><tbody>${[["RMSE","rmse"],["Mean absolute error","mae"],["R²","r2"]].map(([name,key])=>`<tr><td>${name}</td><td>${esc(numberText(m[key]))}</td><td>${esc(numberText(baseline[key]))}</td></tr>`).join("")}</tbody></table></div></details>`:"";
-  return `<div class="metric-grid">${cards}</div><div class="metric-note">${d.test_rows.toLocaleString()} held-out proteins · Continuous value<br>${d.group_disjoint?"✓ Supplied family/groups are disjoint":"Family-disjoint evaluation not established"}<br>${r.training_limit_reached?"Training reached its configured limit":"Training complete"}</div><div class="prediction-heading">Predicted versus actual</div><div id="prediction-chart">${predictionScatter(m.prediction_points)}</div><p class="table-caption">Dashed line: perfect agreement. Lower error is better; R² and correlation can be undefined when values are constant.</p>${comparison}`;
+  return `<div class="metric-grid">${cards}</div><div class="metric-note">${d.test_rows.toLocaleString()} proteins in the supplied test set · Continuous value<br>${separationSummary(d)}<br>${r.training_limit_reached?"Training reached its configured limit":"Training complete"}</div><div class="prediction-heading">Predicted versus actual</div><div id="prediction-chart">${predictionScatter(m.prediction_points)}</div><p class="table-caption">Dashed line: perfect agreement. Lower error is better; R² and correlation can be undefined when values are constant.</p>${comparison}`;
 }
 function renderMetrics(view){
   const r=view.result;
@@ -704,8 +720,8 @@ function renderMetrics(view){
   if(renderedResultRun===view.id)return;
   renderedResultRun=view.id;
   const m=r.metrics,d=r.dataset,continuous=runTaskType(view)==="regression",classes=d.classes||[];
-  const classification=`<div class="metric-grid"><div><small>AUROC${classes.length>2?" · macro OVR":""}</small><strong>${Number.isFinite(m.auroc)?m.auroc.toFixed(4):"Not defined"}</strong></div><div><small>Balanced accuracy</small><strong>${Number.isFinite(m.balanced_accuracy)?(m.balanced_accuracy*100).toFixed(1):"Not defined"}<span class="small">%</span></strong></div><div><small>Macro F1</small><strong>${Number.isFinite(m.macro_f1)?m.macro_f1.toFixed(3):"Not defined"}</strong></div><div><small>Average precision</small><strong>${Number.isFinite(m.average_precision)?m.average_precision.toFixed(3):"Not defined"}</strong></div></div><div class="metric-note">${d.test_rows.toLocaleString()} held-out proteins · ${esc(m.auroc_definition)}<br>${d.group_disjoint?"✓ Supplied family/groups are disjoint":"Family-disjoint evaluation not established"}<br>${r.training_limit_reached?"Training reached its configured limit":"Training complete"}</div><div class="curve-controls"><label>ROC curve<select id="roc-class">${classes.map((c,i)=>`<option value="${esc(c)}"${i===(classes.length===2?1:0)?" selected":""}>${esc(c)}</option>`).join("")}</select></label></div><div id="roc-chart"></div><details class="result-details"><summary>Confusion matrix &amp; class metrics</summary><div class="table-wrap"><table><thead><tr><th>Actual ↓ / predicted →</th>${classes.map(c=>`<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>${(m.confusion_matrix||[]).map((row,i)=>`<tr><th>${esc(classes[i])}</th>${row.map(n=>`<td>${n}</td>`).join("")}</tr>`).join("")}</tbody></table></div><div class="table-wrap"><table><thead><tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1</th><th>n</th></tr></thead><tbody>${(m.per_class||[]).map(c=>`<tr><td>${esc(c.label)}</td><td>${c.precision.toFixed(3)}</td><td>${c.recall.toFixed(3)}</td><td>${c.f1.toFixed(3)}</td><td>${c.support}</td></tr>`).join("")}</tbody></table></div><p class="table-caption">Predictions use the largest class logit. Scores are not independently calibrated.</p></details>`;
-  $("metrics-content").innerHTML=(continuous?regressionMetrics(r):classification)+`<div class="result-warning">${(r.limitations||[]).map(esc).join("<br>")}</div><button class="primary" id="download-model">Download evaluation report ↓</button>`;
+  const classification=`<div class="metric-grid"><div><small>AUROC${classes.length>2?" · macro OVR":""}</small><strong>${Number.isFinite(m.auroc)?m.auroc.toFixed(4):"Not defined"}</strong></div><div><small>Balanced accuracy</small><strong>${Number.isFinite(m.balanced_accuracy)?(m.balanced_accuracy*100).toFixed(1):"Not defined"}<span class="small">%</span></strong></div><div><small>Macro F1</small><strong>${Number.isFinite(m.macro_f1)?m.macro_f1.toFixed(3):"Not defined"}</strong></div><div><small>Average precision</small><strong>${Number.isFinite(m.average_precision)?m.average_precision.toFixed(3):"Not defined"}</strong></div></div><div class="metric-note">${d.test_rows.toLocaleString()} proteins in the supplied test set · ${esc(m.auroc_definition)}<br>${separationSummary(d)}<br>${r.training_limit_reached?"Training reached its configured limit":"Training complete"}</div><div class="curve-controls"><label>ROC curve<select id="roc-class">${classes.map((c,i)=>`<option value="${esc(c)}"${i===(classes.length===2?1:0)?" selected":""}>${esc(c)}</option>`).join("")}</select></label></div><div id="roc-chart"></div><details class="result-details"><summary>Confusion matrix &amp; class metrics</summary><div class="table-wrap"><table><thead><tr><th>Actual ↓ / predicted →</th>${classes.map(c=>`<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>${(m.confusion_matrix||[]).map((row,i)=>`<tr><th>${esc(classes[i])}</th>${row.map(n=>`<td>${n}</td>`).join("")}</tr>`).join("")}</tbody></table></div><div class="table-wrap"><table><thead><tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1</th><th>n</th></tr></thead><tbody>${(m.per_class||[]).map(c=>`<tr><td>${esc(c.label)}</td><td>${c.precision.toFixed(3)}</td><td>${c.recall.toFixed(3)}</td><td>${c.f1.toFixed(3)}</td><td>${c.support}</td></tr>`).join("")}</tbody></table></div><p class="table-caption">Scores are not independently calibrated.</p></details>`;
+  $("metrics-content").innerHTML=(continuous?regressionMetrics(r):classification)+`<div class="result-warning">${evaluationWarnings(d,r.limitations)}</div><button class="primary" id="download-model">Download evaluation report ↓</button>`;
   if(!continuous){
     const roc=()=>{$("roc-chart").innerHTML=plot([{color:"#6f5fa5",points:m.curves[$("roc-class").value].roc}],{xLabel:"False positive rate",yLabel:"True positive rate",diagonal:true});};
     $("roc-class").addEventListener("change",roc);roc();
