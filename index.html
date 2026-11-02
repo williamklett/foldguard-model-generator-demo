@@ -4,8 +4,8 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="Build and evaluate models for protein annotations.">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' http://127.0.0.1:8773 http://localhost:8773; img-src 'self' data:; object-src 'none'; base-uri 'self'">
-  <title>Foldguard Model Generator</title><link rel="stylesheet" href="./reference.css?v=1.3.0">
-  <script src="./app.js?v=1.3.0" defer></script>
+  <title>Foldguard Model Generator</title><link rel="stylesheet" href="./reference.css?v=1.3.1">
+  <script src="./app.js?v=1.3.1" defer></script>
 </head>
 <body>
 <aside class="sidebar">
@@ -23,9 +23,10 @@
     <div class="builder-grid"><div class="setup-column">
       <section class="panel"><div class="section-heading"><span class="step">01</span><div><h2>Add your datasets</h2><p>Labeled protein sequences, in CSV or TSV format.</p></div><a class="subtle-link" id="dataset-template" href="./train-template.csv" download>Get template ↗</a></div>
         <div class="upload-grid">
-          <div class="upload-card dataset-card" id="train-drop"><span class="upload-icon">▤</span><strong>Training set</strong><span class="file-name" id="train-filename">Choose from storage</span><small id="train-detail">Used to train your model</small><button class="secondary" type="button" data-storage-split="train">Browse storage ↗</button></div>
-          <div class="upload-card dataset-card" id="test-drop"><span class="upload-icon">▤</span><strong>Test set</strong><span class="file-name" id="test-filename">Choose from storage</span><small id="test-detail">Reserved for the final evaluation</small><button class="secondary" type="button" data-storage-split="test">Browse storage ↗</button></div>
+          <div class="upload-card dataset-card" id="train-drop"><span class="upload-icon">▤</span><strong id="train-dataset-label">Training set</strong><select id="train-dataset-select" aria-labelledby="train-dataset-label" aria-describedby="dataset-catalog-status train-detail" disabled><option value="" disabled selected>Choose a training dataset</option></select><span class="file-name" id="train-filename">Choose from storage</span><small id="train-detail">Used to train your model</small><button class="secondary" type="button" data-storage-split="train">Browse storage ↗</button></div>
+          <div class="upload-card dataset-card" id="test-drop"><span class="upload-icon">▤</span><strong id="test-dataset-label">Test set</strong><select id="test-dataset-select" aria-labelledby="test-dataset-label" aria-describedby="dataset-catalog-status test-detail" disabled><option value="" disabled selected>Choose a test dataset</option></select><span class="file-name" id="test-filename">Choose from storage</span><small id="test-detail">Reserved for the final evaluation</small><button class="secondary" type="button" data-storage-split="test">Browse storage ↗</button></div>
         </div>
+        <div class="dataset-catalog-toolbar"><p id="dataset-catalog-status" role="status" aria-live="polite">Connect this computer to choose datasets from your saved storage.</p><div><button class="subtle-link" type="button" id="refresh-datasets" disabled>Refresh ↻</button><button class="subtle-link hidden" type="button" id="more-datasets">Load more files ↓</button></div></div>
         <div class="storage-note">Read directly from R2, S3, or a signed HTTPS link. Your connector accesses the files; storage credentials stay on your computer.</div>
         <details class="local-upload"><summary>Have a file on this computer?</summary><div class="form-grid"><label>Training file<input id="train-file" type="file" accept=".csv,.tsv,text/csv,text/tab-separated-values"></label><label>Test file<input id="test-file" type="file" accept=".csv,.tsv,text/csv,text/tab-separated-values"></label></div></details>
         <div class="format-note"><span>ⓘ</span> One protein per row. Include a sequence and the annotation to predict. Maximum 1,000 residues per protein.</div>

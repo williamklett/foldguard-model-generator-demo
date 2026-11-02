@@ -10,6 +10,8 @@ let polling = false, busy = false, selectedLoss = "", previousView = null;
 const files = {train:null,test:null};
 let summaryTimer, renderedResultRun = null, validationRevision = 0;
 const datasetRevision = {train:0,test:0}, pendingFiles = {train:null,test:null};
+const datasetCatalog = new Map(), datasetChoices = {train:"",test:""}, datasetImports = {train:null,test:null};
+let datasetCatalogEpoch = 0, datasetConnectionEpoch = 0;
 let storageSplit = "train", storageSession = 0, storageRequest = 0, storageNext = null, storageRows = [], storageLoading = false, storageConnecting = false;
 let reconnectingStorageID = null;
 let pairingWindow = null, pairingState = "", pairingTimer = null, importingDatasets = 0;
@@ -31,6 +33,7 @@ async function api(path, body, options={}) {
   return data;
 }
 function connectionUI(value) {
+  if(connected&&!value){datasetCatalogEpoch++;datasetConnectionEpoch++;datasetCatalog.clear();}
   connected=value;
   $("connection-dot").classList.toggle("online",value);
   $("side-dot").classList.toggle("online",value);
@@ -38,6 +41,7 @@ function connectionUI(value) {
   $("side-status").textContent=value?"Companion connected":"Companion offline";
   $("launch-run").disabled=!value||busy||importingDatasets>0||!!pendingFiles.train||!!pendingFiles.test;
   $("local-token-tools").classList.toggle("hidden",!localPage||!value);
+  renderDatasetChoices();
 }
 function showConnection() {
   $("service-url").value=base;
@@ -72,11 +76,13 @@ function datasetChanged() {
   $("dataset-summary").classList.add("hidden");
   populateColumns();
 }
-function acceptDataset(split, data) {
+function acceptDataset(split, data, choice="") {
   files[split]=data;
+  datasetChoices[split]=choice;
   $(split+"-filename").textContent=data.name;
   $(split+"-detail").textContent=data.rows.toLocaleString()+" proteins · "+data.columns.length+" columns";
   $(split+"-drop").classList.add("filled");
+  renderDatasetChoices();
   datasetChanged();
 }
 async function uploadPending(split) {
@@ -97,6 +103,7 @@ async function loadFile(split,file){
   if(!file)return;
   if(file.size>24*1024**2){notice("Choose a file smaller than 24 MB.",true);return;}
   const revision=++datasetRevision[split];
+  datasetChoices[split]="";
   files[split]=null;pendingFiles[split]={file,revision,uploading:false};datasetChanged();
   $(split+"-filename").textContent=file.name;
   $(split+"-detail").textContent=connected?"Importing table…":"Connect this computer to import this file";
@@ -138,6 +145,100 @@ async function validateSummary(){
   }catch(error){if(revision===validationRevision){$("dataset-summary").innerHTML=`<div class="warning-text">${esc(error.message)}</div>`;$("dataset-summary").classList.remove("hidden");}}
 }
 function storageStatus(message,error=false){$("storage-status").textContent=message;$("storage-status").classList.toggle("error",error);}
+function datasetCatalogSignature(store){return JSON.stringify([store.id,store.bucket,store.prefix,store.configured]);}
+function datasetChoiceValue(storeID,object){return JSON.stringify([storeID,object.key,object.selection_id]);}
+function datasetCatalogObjects(){
+  return stores.flatMap(store=>{
+    const entry=datasetCatalog.get(store.id);
+    return entry?.signature===datasetCatalogSignature(store)?entry.objects.filter(o=>o.supported&&/\.(csv|tsv)$/i.test(o.key)&&o.etag&&o.selection_id).map(object=>({store,object,value:datasetChoiceValue(store.id,object)})):[];
+  });
+}
+function renderDatasetChoices(){
+  const available=datasetCatalogObjects(),entries=[...datasetCatalog.values()],loading=entries.some(e=>e.loading),hasMore=entries.some(e=>e.next),errors=entries.filter(e=>e.error);
+  for(const split of ["train","test"]){
+    const select=$(split+"-dataset-select"),choice=datasetImports[split]?.choice||datasetChoices[split],snapshot=files[split];
+    let html='<option value="" disabled>Choose a '+(split==="train"?"training":"test")+' dataset</option>';
+    if(snapshot&&!available.some(row=>row.value===choice))html+=`<option value="${esc(choice||"imported-snapshot")}" disabled>${esc(snapshot.name)} · imported snapshot</option>`;
+    for(const store of stores){
+      const rows=available.filter(row=>row.store.id===store.id);
+      if(rows.length)html+=`<optgroup label="${esc(store.name)}">${rows.map(row=>`<option value="${esc(row.value)}">${esc(row.object.key)}</option>`).join("")}</optgroup>`;
+    }
+    if(select.datasetOptionsHTML!==html){select.innerHTML=html;select.datasetOptionsHTML=html;}
+    select.value=choice||(snapshot?"imported-snapshot":"");
+    select.disabled=!connected||!available.length||!!datasetImports[split]||!!pendingFiles[split];
+    select.setAttribute("aria-busy",String(!!datasetImports[split]));
+  }
+  let message;
+  if(!connected)message="Connect this computer to choose datasets from your saved storage.";
+  else if(!stores.length)message="Connect storage to populate your training and test choices.";
+  else if(loading)message="Reading file choices from your storage…"+(available.length?" "+available.length.toLocaleString()+" CSV/TSV files found.":"");
+  else if(available.length)message=available.length.toLocaleString()+" CSV/TSV file"+(available.length===1?"":"s")+" available. Select a file to check its columns.";
+  else if(hasMore)message="No CSV or TSV datasets in the files loaded so far. Load more files or browse a specific folder.";
+  else message="No CSV or TSV dataset files found in the connected folders. Browse storage to choose another folder.";
+  const unconfigured=stores.some(store=>store.configured===false);
+  if(connected&&unconfigured&&!available.length)message+=" Some storage connections need credentials; reconnect them in Browse storage.";
+  if(connected&&errors.length)message+=" Some connections could not be read. Browse storage to check their connection.";
+  if(connected&&hasMore&&available.length&&!loading)message+=" More files are available.";
+  $("dataset-catalog-status").textContent=message;
+  $("dataset-catalog-status").classList.toggle("error",connected&&errors.length>0);
+  $("refresh-datasets").disabled=!connected||loading||!stores.some(store=>store.configured);
+  $("more-datasets").classList.toggle("hidden",!connected||!hasMore);
+  $("more-datasets").disabled=loading;
+}
+function seedDatasetCatalog(store,result){
+  if(!store?.configured)return;
+  datasetCatalog.set(store.id,{signature:datasetCatalogSignature(store),objects:result.objects||[],next:result.next_token||null,loading:false,queued:false,error:"",request:0,pages:1,scanned:!result.next_token});
+  renderDatasetChoices();
+}
+async function loadDatasetChoices(store,more=false){
+  const entry=datasetCatalog.get(store.id);
+  if(!connected||!store.configured||!entry||entry.loading||(more&&!entry.next))return;
+  const epoch=datasetCatalogEpoch,request=++entry.request,continuation=more?entry.next:null;
+  entry.loading=true;entry.error="";renderDatasetChoices();
+  try{
+    const result=await api("/api/storage/objects",{store_id:store.id,prefix:store.prefix||"",max_keys:1000,...(continuation?{continuation_token:continuation}:{})});
+    if(!connected||epoch!==datasetCatalogEpoch||datasetCatalog.get(store.id)!==entry||entry.request!==request)return;
+    const objects=more?[...entry.objects,...result.objects]:result.objects;
+    entry.objects=[...new Map(objects.map(object=>[object.key,object])).values()];
+    entry.next=result.next_token||null;entry.pages=more?entry.pages+1:1;
+  }catch(error){if(epoch===datasetCatalogEpoch&&datasetCatalog.get(store.id)===entry&&entry.request===request)entry.error=error.message;}
+  finally{if(epoch===datasetCatalogEpoch&&datasetCatalog.get(store.id)===entry&&entry.request===request){entry.loading=false;renderDatasetChoices();}}
+}
+async function syncDatasetCatalog(refresh=false,more=false){
+  if(!connected){renderDatasetChoices();return;}
+  if(refresh){datasetCatalogEpoch++;datasetCatalog.clear();}
+  const ids=new Set(stores.filter(store=>store.configured).map(store=>store.id));
+  for(const id of datasetCatalog.keys())if(!ids.has(id))datasetCatalog.delete(id);
+  const pending=[];
+  for(const store of stores.filter(store=>store.configured)){
+    let entry=datasetCatalog.get(store.id);
+    if(!entry||entry.signature!==datasetCatalogSignature(store)){
+      entry={signature:datasetCatalogSignature(store),objects:[],next:null,loading:false,queued:true,error:"",request:0,pages:0,scanned:false};datasetCatalog.set(store.id,entry);pending.push([store,false]);
+    }else if(more&&entry.next&&!entry.loading&&!entry.queued){entry.queued=true;pending.push([store,true]);}
+    else if(!entry.scanned&&!entry.loading&&!entry.queued){entry.queued=true;pending.push([store,!!entry.next]);}
+  }
+  renderDatasetChoices();
+  // Initial discovery reads metadata only, up to 20 pages per connection.
+  // Larger stores remain browsable with a bounded one-page Load more action.
+  const epoch=datasetCatalogEpoch;
+  async function worker(){
+    while(pending.length&&epoch===datasetCatalogEpoch){
+      const [store,next]=pending.shift(),entry=datasetCatalog.get(store.id);
+      if(!entry||entry.loading)continue;
+      entry.queued=false;
+      await loadDatasetChoices(store,next);
+      while(!more&&epoch===datasetCatalogEpoch&&datasetCatalog.get(store.id)===entry&&entry.next&&!entry.error&&entry.pages<20)await loadDatasetChoices(store,true);
+      if(epoch===datasetCatalogEpoch&&datasetCatalog.get(store.id)===entry)entry.scanned=true;
+    }
+  }
+  await Promise.all(Array.from({length:Math.min(3,pending.length)},worker));
+}
+async function chooseDataset(split){
+  const value=$(split+"-dataset-select").value,row=datasetCatalogObjects().find(candidate=>candidate.value===value);
+  if(!connected||!row||datasetImports[split]){renderDatasetChoices();return;}
+  if(files[split]&&datasetChoices[split]===value)return;
+  return importDataset({store_id:row.store.id,key:row.object.key,etag:row.object.etag,selection_id:row.object.selection_id},{split,source:"dropdown",choice:value});
+}
 function renderStores(){
   const current=$("storage-select").value;
   $("storage-select").innerHTML='<option value="">Choose a connection</option>'+stores.map(p=>`<option value="${esc(p.id)}">${esc(p.name)} · ${esc(p.bucket)}</option>`).join("");
@@ -186,17 +287,29 @@ async function listStorage(more=false){
   }catch(error){if(request===storageRequest&&session===storageSession)storageStatus(error.message,true);}
   finally{if(request===storageRequest){storageLoading=false;$("storage-list-button").disabled=false;$("storage-more").disabled=false;}}
 }
-async function importDataset(body){
-  const split=storageSplit,session=storageSession,revision=++datasetRevision[split];
+async function importDataset(body,options={}){
+  const split=options.split||storageSplit,dialog=options.source!=="dropdown";
+  if(datasetImports[split])return;
+  const session=storageSession,epoch=datasetConnectionEpoch,revision=++datasetRevision[split],operation={revision,choice:options.choice||""};
+  datasetImports[split]=operation;
   pendingFiles[split]=null;importingDatasets++;connectionUI(connected);
-  storageStatus("Importing and checking your dataset…");
-  document.querySelectorAll(".storage-object").forEach(b=>b.disabled=true);$("import-url").disabled=true;
+  if(dialog){storageStatus("Importing and checking your dataset…");document.querySelectorAll(".storage-object").forEach(b=>b.disabled=true);$("import-url").disabled=true;}
+  else $(split+"-detail").textContent="Importing and checking your dataset…";
   try{
     const data=await api("/api/datasets/import",body);
-    if(session!==storageSession||revision!==datasetRevision[split])return;
-    acceptDataset(split,data);$("dataset-url").value="";$("storage-dialog").close();clearNotice();
-  }catch(error){if(session===storageSession)storageStatus(error.message,true);}
-  finally{importingDatasets--;connectionUI(connected);if(session===storageSession){$("import-url").disabled=false;renderStorageRows();}}
+    if(!connected||epoch!==datasetConnectionEpoch||(dialog&&session!==storageSession)||revision!==datasetRevision[split])return;
+    acceptDataset(split,data,options.choice||"");if(dialog){$("dataset-url").value="";$("storage-dialog").close();}clearNotice();
+  }catch(error){
+    if(connected&&epoch===datasetConnectionEpoch&&revision===datasetRevision[split]){
+      if(dialog&&session===storageSession)storageStatus(error.message,true);
+      else if(!dialog){$(split+"-detail").textContent=files[split]?files[split].rows.toLocaleString()+" proteins · "+files[split].columns.length+" columns":"Import failed · choose a dataset again";notice(error.message,true);}
+    }
+  }
+  finally{
+    datasetImports[split]=null;importingDatasets--;connectionUI(connected);
+    if(!dialog&&epoch!==datasetConnectionEpoch&&revision===datasetRevision[split])$(split+"-detail").textContent=files[split]?files[split].rows.toLocaleString()+" proteins · "+files[split].columns.length+" columns":"Choose a dataset after reconnecting";
+    if(dialog&&session===storageSession){$("import-url").disabled=false;renderStorageRows();}
+  }
 }
 function importStorageObject(object){return importDataset({store_id:$("storage-select").value,key:object.key,etag:object.etag,selection_id:object.selection_id});}
 function clearStorageCredentials(){
@@ -255,8 +368,9 @@ async function connectStorage(event){
     if(session!==storageSession)return;
     stores=[...stores.filter(p=>p.id!==result.profile.id),result.profile];renderStores();$("storage-select").value=result.profile.id;$("storage-prefix").value=result.profile.prefix||"";
     $("storage-settings").open=false;resetStorageListing();
-    if(method==="direct"){storageRows=result.objects||[];storageNext=result.next_token||null;renderStorageRows();storageStatus("Connected. Choose a dataset to import.");}
+    if(method==="direct"){storageRows=result.objects||[];storageNext=result.next_token||null;seedDatasetCatalog(result.profile,result);renderStorageRows();storageStatus("Connected. Choose a dataset to import.");}
     else await listStorage();
+    syncDatasetCatalog();
   }catch(error){if(session===storageSession)storageStatus(error.message,true);}
   finally{clearStorageCredentials();storageConnecting=false;storageCredentialsUI();}
 }
@@ -414,6 +528,7 @@ function renderMonitor(view){
 async function refreshRun(){if(!currentRun||!connected)return;const view=await api("/api/runs/"+currentRun);renderMonitor(view);}
 function applyWorkspaceState(data){
   profiles=data.profiles;runs=data.runs;checks=data.checks;stores=data.stores||[];supportedTaskTypes=Array.isArray(data.task_types)?data.task_types:["classification"];storageAuthMethods=Array.isArray(data.storage_auth_methods)?data.storage_auth_methods:[];connectionUI(true);taskTypeHelp();storageCredentialsUI();renderCompute();renderRuns();
+  syncDatasetCatalog();
 }
 async function refresh(){
   if(polling||!token)return;polling=true;
@@ -424,12 +539,15 @@ async function refresh(){
 
 document.querySelectorAll("[data-view]").forEach(b=>b.addEventListener("click",()=>changeView(b.dataset.view)));
 for(const split of ["train","test"]){
+  $(split+"-dataset-select").addEventListener("change",()=>chooseDataset(split));
   $(split+"-file").addEventListener("change",e=>loadFile(split,e.target.files[0]));
   const drop=$(split+"-drop");
   for(const event of ["dragenter","dragover"])drop.addEventListener(event,e=>{e.preventDefault();drop.classList.add("dragover");});
   for(const event of ["dragleave","drop"])drop.addEventListener(event,e=>{e.preventDefault();drop.classList.remove("dragover");});
   drop.addEventListener("drop",e=>loadFile(split,e.dataTransfer.files[0]));
 }
+$("refresh-datasets").addEventListener("click",()=>syncDatasetCatalog(true));
+$("more-datasets").addEventListener("click",()=>syncDatasetCatalog(false,true));
 for(const id of ["sequence-column","label-column","id-column","group-column"])$(id).addEventListener("change",scheduleSummary);
 $("task-type").addEventListener("change",updateTaskType);
 document.querySelectorAll('input[name="compute"]').forEach(input=>input.addEventListener("change",()=>{document.querySelectorAll(".compute-card").forEach(c=>c.classList.toggle("selected",c.querySelector("input").checked));}));
