@@ -32,7 +32,7 @@ async function api(path, body, options={}) {
     ...(body===undefined?{}:{body:JSON.stringify(body)}),signal:AbortSignal.timeout(options.timeout || 120000)});
   if(options.blob){ if(!response.ok)throw new Error((await response.json()).error); return response.blob(); }
   const data = await response.json();
-  if(!response.ok)throw new Error(data.error || "The request could not be completed.");
+  if(!response.ok)throw new Error(data.error || "Request failed");
   return data;
 }
 function connectionUI(value) {
@@ -40,8 +40,8 @@ function connectionUI(value) {
   connected=value;
   $("connection-dot").classList.toggle("online",value);
   $("side-dot").classList.toggle("online",value);
-  $("connection-label").textContent=value?"Workspace connected":"Connect this computer";
-  $("side-status").textContent=value?"Companion connected":"Companion offline";
+  $("connection-label").textContent=value?"Connected":"Connect this computer";
+  $("side-status").textContent=value?"Connected":"Disconnected";
   $("launch-run").disabled=!value||busy||importingDatasets>0||!!pendingFiles.train||!!pendingFiles.test||files.train?.kind==="fasta"||files.test?.kind==="fasta"||!selectedCompute()||!readyValidationID;
   $("local-token-tools").classList.toggle("hidden",!localPage||!value);
   renderDatasetChoices();
@@ -97,7 +97,7 @@ function taskType(){return $("task-type").value;}
 function supportsTask(){return taskType()!=="regression"||supportedTaskTypes.includes("regression");}
 function runTaskType(view){return view?.result?.task_type||view?.result?.dataset?.task_type||view?.summary?.task_type||view?.task_type||"classification";}
 function numberText(value,digits=3){
-  if(!Number.isFinite(value))return "Not defined";
+  if(!Number.isFinite(value))return "Undefined";
   if(value===0)return "0";
   return Math.abs(value)>=10000||Math.abs(value)<.001?value.toExponential(2):value.toLocaleString(undefined,{maximumFractionDigits:digits});
 }
@@ -105,7 +105,7 @@ function taskTypeHelp(){
   const continuous=taskType()==="regression";
   $("annotation-type-badge").textContent=continuous?"Continuous value":"Discrete categories";
   $("dataset-template").href=continuous?"./regression-train-template.csv":"./train-template.csv";
-  $("annotation-type-help").textContent=continuous?(connected&&!supportsTask()?"Update your connector to use continuous values.":"Predict a numeric measurement. Rows with blank annotations are excluded; populated values must be finite numbers. Include at least two labeled training proteins with varying values and one labeled test protein."):"Predict a category such as location or function. Rows with blank annotations are excluded. Include at least two training classes and one labeled test protein.";
+  $("annotation-type-help").textContent=continuous&&connected&&!supportsTask()?"Connector update required for regression":"";
 }
 function updateTaskType(){
   taskTypeHelp();
@@ -115,47 +115,47 @@ function datasetPayload(){return {train_ref:files.train.id,test_ref:files.test.i
 function scheduleSummary(){validationRevision++;readyValidationID="";connectionUI(connected);clearTimeout(summaryTimer);summaryTimer=setTimeout(validateSummary,300);}
 function separationSummary(data){
   const lines=[];
-  if(data.exact_sequence_disjoint===true)lines.push("✓ No identical proteins shared between training and test");
-  else if(data.exact_sequence_disjoint===false)lines.push('<span class="warning-text">Identical proteins occur in both training and test.</span>');
-  if(data.group_disjoint===true)lines.push("✓ Supplied groups are disjoint");
-  else if(data.group_disjoint===false)lines.push(`<span class="warning-text">${data.group_column?"Supplied groups overlap between training and test.":"Group separation is not established."}</span>`);
+  if(data.exact_sequence_disjoint===true)lines.push("✓ Protein overlap: none");
+  else if(data.exact_sequence_disjoint===false)lines.push('<span class="warning-text">Protein overlap: present</span>');
+  if(data.group_disjoint===true)lines.push("✓ Group overlap: none");
+  else if(data.group_disjoint===false)lines.push(`<span class="warning-text">${data.group_column?"Group overlap: present":"Group separation: unknown"}</span>`);
   return lines.join("<br>");
 }
 function evaluationWarnings(data,extra=[]){
   const messages=[...(Array.isArray(data.warnings)?data.warnings:[]),...(Array.isArray(extra)?extra:[])];
-  if(data.exact_sequence_disjoint===false)messages.push("Training and test share identical proteins; scores describe this supplied test set and may be optimistic.");
-  if(data.group_disjoint===false&&data.group_column)messages.push("Training and test share groups; performance on unseen groups is not established.");
-  if(data.homology_screened!==true)messages.push("Sequence similarity between sets is not screened.");
+  if(data.exact_sequence_disjoint===false)messages.push("Protein overlap: scores may be optimistic");
+  if(data.group_disjoint===false&&data.group_column)messages.push("Unseen-group performance: unverified");
+  if(data.homology_screened!==true)messages.push("Homology screening: none");
   return [...new Set(messages.filter(message=>typeof message==="string"&&message))].map(esc).join("<br>");
 }
 async function validateSummary(){
   if(!connected||!selectedCompute()||!backgroundDatasetImports||!files.train?.id||!files.test?.id||files.train.kind==="fasta"||files.test.kind==="fasta"||!mapping().sequence||!mapping().label)return;
-  if(!supportsTask()){$("dataset-summary").innerHTML='<div class="warning-text">Update your connector to use continuous values.</div>';$("dataset-summary").classList.remove("hidden");return;}
+  if(!supportsTask()){$("dataset-summary").innerHTML='<div class="warning-text">Connector update required for regression</div>';$("dataset-summary").classList.remove("hidden");return;}
   const revision=validationRevision;
   try{
-    $("dataset-summary").textContent="Checking the datasets on your compute…";$("dataset-summary").classList.remove("hidden");
+    $("dataset-summary").textContent="Checking datasets…";$("dataset-summary").classList.remove("hidden");
     const queued=await api("/api/validations",datasetPayload());
-    if(!/^[a-f0-9]{32}$/.test(queued.id||""))throw new Error("The connector returned an invalid dataset check reference.");
+    if(!/^[a-f0-9]{32}$/.test(queued.id||""))throw new Error("Invalid dataset check reference");
     let job=queued;
     while(connected&&revision===validationRevision&&["queued","running"].includes(job.status)){
       await new Promise(resolve=>setTimeout(resolve,1500));
       if(!connected||revision!==validationRevision)return;
       job=await api("/api/validations/"+queued.id);
       if(revision!==validationRevision)return;
-      $("dataset-summary").textContent=job.message||"Checking the datasets on your compute…";
+      $("dataset-summary").textContent=job.message||"Checking datasets…";
     }
     if(!connected||revision!==validationRevision)return;
-    if(job.status!=="completed"||!job.summary)throw new Error(job.message||"The dataset check could not be completed.");
+    if(job.status!=="completed"||!job.summary)throw new Error(job.message||"Dataset check failed");
     const data=job.summary;
     const continuous=data.task_type==="regression";
     const extra=continuous?`<span><strong>${esc(numberText(data.target_summary.train.min))}–${esc(numberText(data.target_summary.train.max))}</strong>training value range</span>`:`<span><strong>${data.classes.length}</strong>classes</span>`;
     const target=continuous?`<div class="target-summary">Test value range: ${esc(numberText(data.target_summary.test.min))} to ${esc(numberText(data.target_summary.test.max))}<br>Training mean: ${esc(numberText(data.target_summary.train.mean))} · Standard deviation: ${esc(numberText(data.target_summary.train.std))}</div>`:"";
     const countLines=[];
-    for(const [counts,label] of [[data.source_rows,"Source rows"],[data.excluded_unlabeled,"Excluded for blank annotations"]]){
+    for(const [counts,label] of [[data.source_rows,"Source rows"],[data.excluded_unlabeled,"Unlabeled rows excluded"]]){
       if(Number.isSafeInteger(counts?.train)&&counts.train>=0&&Number.isSafeInteger(counts?.test)&&counts.test>=0)countLines.push(`${label}: ${counts.train.toLocaleString()} training · ${counts.test.toLocaleString()} test`);
     }
     const duplicates=data.excluded_duplicates;
-    if(Number.isSafeInteger(duplicates?.train)&&duplicates.train>=0&&Number.isSafeInteger(duplicates?.test)&&duplicates.test>=0&&(duplicates.train||duplicates.test))countLines.push(`Consolidated identical labeled proteins: ${duplicates.train.toLocaleString()} training · ${duplicates.test.toLocaleString()} test`);
+    if(Number.isSafeInteger(duplicates?.train)&&duplicates.train>=0&&Number.isSafeInteger(duplicates?.test)&&duplicates.test>=0&&(duplicates.train||duplicates.test))countLines.push(`Duplicate rows consolidated: ${duplicates.train.toLocaleString()} training · ${duplicates.test.toLocaleString()} test`);
     const inputCounts=countLines.length?`<div class="target-summary">${countLines.join("<br>")}</div>`:"";
     $("dataset-summary").innerHTML=`<div class="summary-grid${continuous?" numeric-summary":""}"><span><strong>${data.train_rows.toLocaleString()}</strong>training proteins</span><span><strong>${data.test_rows.toLocaleString()}</strong>test proteins</span>${extra}</div>${inputCounts}${target}<div>${separationSummary(data)}</div><div class="warning-text">${evaluationWarnings(data)}</div>`;
     $("dataset-summary").classList.remove("hidden");readyValidationID=queued.id;connectionUI(connected);
@@ -164,10 +164,10 @@ async function validateSummary(){
 function storageStatus(message,error=false){$("storage-status").textContent=message;$("storage-status").classList.toggle("error",error);}
 function datasetDetail(data){
   const destination=data.compute_name?" · On "+data.compute_name:"";
-  if(data.kind==="fasta")return data.rows.toLocaleString()+" sequences · Sequences imported; attach an annotation table to train"+destination;
+  if(data.kind==="fasta")return data.rows.toLocaleString()+" sequences · Annotations required"+destination;
   const detail=[data.rows.toLocaleString()+" rows · "+data.columns.length+" columns"];
-  if(data.curation)detail.push("Sampled from the annotated viral corpus · "+data.curation.protocol.replace("cluster","")+"% cluster holdout");
-  if(data.input_table_format==="mmseqs_cluster")detail.push("Cluster membership · protein_id matches sequences; cluster_id is the group");
+  if(data.curation)detail.push(""+data.curation.protocol.replace("cluster","")+"% cluster holdout");
+  if(data.input_table_format==="mmseqs_cluster")detail.push("Cluster membership");
   if(data.unmatched_metadata_rows)detail.push(data.unmatched_metadata_rows.toLocaleString()+" metadata rows not used");
   for(const [key,label] of [["matched_rows","matched proteins"],["unmatched_annotation_rows","annotation rows not used"],["unannotated_sequence_rows","sequences without annotations"]])if(Number.isInteger(data[key])&&data[key]>=0)detail.push(data[key].toLocaleString()+" "+label);
   return detail.join(" · ")+destination;
@@ -204,19 +204,19 @@ function renderDatasetChoices(){
     $(split+"-attach-annotations").classList.toggle("hidden",!snapshot||!!snapshot.curation);
     $(split+"-attach-annotations").disabled=!connected||!backgroundDatasetImports||!!datasetImports[split];
   }
-  const formats=backgroundDatasetImports?"CSV/TSV/FASTA":"CSV/TSV",formatWords=backgroundDatasetImports?"CSV, TSV, or FASTA":"CSV or TSV";
+  const formats=backgroundDatasetImports?"CSV/TSV/FASTA":"CSV/TSV";
   let message;
-  if(!connected)message="Connect this computer to choose datasets from your saved storage.";
-  else if(!stores.length)message="Connect storage to populate your training and test choices.";
-  else if(loading)message="Reading file choices from your storage…"+(available.length?" "+available.length.toLocaleString()+" "+formats+" files found.":"");
-  else if(available.length&&available.every(row=>row.object.virtual))message="Annotated viral proteins · Choose matching training and test samples with a 90% or 30% cluster holdout. Sequences and metadata are included.";
-  else if(available.length)message=available.length.toLocaleString()+" "+formats+" file"+(available.length===1?"":"s")+" available. Select a file to import it.";
-  else if(hasMore)message="No "+formatWords+" datasets in the files loaded so far. Load more files or browse a specific folder.";
-  else message="No "+formatWords+" dataset files found in the connected folders. Browse storage to choose another folder.";
+  if(!connected)message="Connector disconnected";
+  else if(!stores.length)message="Storage disconnected";
+  else if(loading)message="Reading storage…"+(available.length?" · "+available.length.toLocaleString()+" files":"");
+  else if(available.length&&available.every(row=>row.object.virtual))message="Annotated viral proteins";
+  else if(available.length)message=available.length.toLocaleString()+" "+formats+" file"+(available.length===1?"":"s");
+  else if(hasMore)message="No "+formats+" files · More available";
+  else message="No "+formats+" files";
   const unconfigured=stores.some(store=>store.configured===false);
-  if(connected&&unconfigured&&!available.length)message+=" Some storage connections need credentials; reconnect them in Browse storage.";
-  if(connected&&errors.length)message+=" Some connections could not be read. Browse storage to check their connection.";
-  if(connected&&hasMore&&available.length&&!loading)message+=" More files are available.";
+  if(connected&&unconfigured&&!available.length)message+=" · Storage credentials required";
+  if(connected&&errors.length)message+=" · Storage connection error";
+  if(connected&&hasMore&&available.length&&!loading)message+=" · More files available";
   $("dataset-catalog-status").textContent=message;
   $("dataset-catalog-status").classList.toggle("error",connected&&errors.length>0);
   $("refresh-datasets").disabled=!connected||loading||!stores.some(store=>store.configured);
@@ -228,8 +228,8 @@ function changeClustering(){
   if(importingDatasets)return;
   for(const split of ["train","test"]){
     files[split]=null;datasetChoices[split]="";datasetRevision[split]++;
-    $(split+"-filename").textContent="Choose from the annotated viral collection";
-    $(split+"-detail").textContent=split==="train"?"Used to train your model":"Reserved for the final evaluation";
+    $(split+"-filename").textContent="";
+    $(split+"-detail").textContent=split==="train"?"":"";
     $(split+"-drop").classList.remove("filled");
   }
   datasetChanged();renderDatasetChoices();
@@ -297,54 +297,54 @@ function renderStores(){
 function resetStorageListing(){
   storageRequest++;storageRows=[];storageNext=null;storageLoading=false;
   $("storage-more").classList.add("hidden");$("storage-list-button").disabled=false;
-  $("storage-objects").innerHTML='<p class="small">Browse a folder to choose a dataset.</p>';
+  $("storage-objects").innerHTML='<p class="small">Select folder</p>';
 }
 function openStorage(split){
-  if(!connected){notice("Connect this computer to browse your storage.",true);showConnection();return;}
+  if(!connected){notice("Connector disconnected",true);showConnection();return;}
   reconnectingStorageID=null;
   storageSplit=split;storageSession++;resetStorageListing();renderStores();
-  $("storage-dialog-title").textContent="Choose your "+(split==="train"?"training":"test")+" set.";
+  $("storage-dialog-title").textContent=(split==="train"?"Training":"Test")+" set";
   const selectedStore=stores.find(p=>p.id===$("storage-select").value),needsCredentials=selectedStore?.configured===false;
   $("storage-prefix").value=selectedStore?.prefix||"";
   clearStorageCredentials();storageCredentialsUI();
   $("storage-settings").open=!stores.length||needsCredentials;
   if(needsCredentials)prefillStorageReconnect(selectedStore);
-  storageStatus(needsCredentials?"Enter your server and access keys to connect this storage.":"Storage credentials stay with your connector.");
+  storageStatus(needsCredentials?"Storage credentials required":"");
   $("storage-dialog").showModal();
   if(stores.length&&!needsCredentials)listStorage(false);
 }
 function renderStorageRows(){
-  $("storage-objects").innerHTML=storageRows.length?storageRows.map((o,i)=>(o.split&&o.split!==storageSplit)||(o.protocol&&o.protocol!==($("cluster-holdout").value||"cluster90"))?"":`<button type="button" class="storage-object" data-storage-object="${i}" ${o.supported?"":"disabled"}><span><strong>${esc(o.label||o.key)}</strong><small>${o.virtual?"Matched sequences and metadata · Prepared on Adroit over SSH":Number.isFinite(o.size)?formatImportBytes(o.size):""}${o.last_modified?" · "+esc(o.last_modified):""}</small></span><span>${o.supported?"Select ↗":o.size===0?"Empty file":o.size>maxImportBytes?"Exceeds "+formatImportBytes(maxImportBytes):"Unavailable"}</span></button>`).join(""):'<p class="small">No files found in this folder.</p>';
+  $("storage-objects").innerHTML=storageRows.length?storageRows.map((o,i)=>(o.split&&o.split!==storageSplit)||(o.protocol&&o.protocol!==($("cluster-holdout").value||"cluster90"))?"":`<button type="button" class="storage-object" data-storage-object="${i}" ${o.supported?"":"disabled"}><span><strong>${esc(o.label||o.key)}</strong><small>${o.virtual?"Sequences + metadata":Number.isFinite(o.size)?formatImportBytes(o.size):""}${o.last_modified?" · "+esc(o.last_modified):""}</small></span><span>${o.supported?"Select ↗":o.size===0?"Empty file":o.size>maxImportBytes?"Exceeds "+formatImportBytes(maxImportBytes):"Unavailable"}</span></button>`).join(""):'<p class="small">No files</p>';
   document.querySelectorAll("[data-storage-object]").forEach(b=>b.addEventListener("click",()=>importStorageObject(storageRows[Number(b.dataset.storageObject)])));
   $("storage-more").classList.toggle("hidden",!storageNext);
 }
 async function listStorage(more=false){
   const storeID=$("storage-select").value;
-  if(!storeID){storageStatus("Add or select a storage connection first.",true);return;}
+  if(!storeID){storageStatus("Storage connection required",true);return;}
   if(storageLoading)return;
   const request=++storageRequest,session=storageSession,prefix=$("storage-prefix").value;
   storageLoading=true;$("storage-list-button").disabled=true;$("storage-more").disabled=true;
-  storageStatus("Reading your storage…");
+  storageStatus("Reading storage…");
   try{
     const result=await api("/api/storage/objects",{store_id:storeID,prefix,...(more&&storageNext?{continuation_token:storageNext}:{})});
     if(request!==storageRequest||session!==storageSession)return;
     storageRows=more?[...storageRows,...result.objects]:result.objects;storageNext=result.next_token;renderStorageRows();
-    storageStatus("Choose a dataset to import directly to your SSH compute.");
+    storageStatus("Select dataset");
   }catch(error){if(request===storageRequest&&session===storageSession)storageStatus(error.message,true);}
   finally{if(request===storageRequest){storageLoading=false;$("storage-list-button").disabled=false;$("storage-more").disabled=false;}}
 }
 async function importDataset(body,options={}){
   const split=options.split||storageSplit,dialog=options.source!=="dropdown",background=true;
-  if(!backgroundDatasetImports){notice("Update your connector to import directly to SSH compute.",true);return;}
-  if(!selectedCompute()){notice("Configure your SSH compute before importing datasets.",true);configure();return;}
+  if(!backgroundDatasetImports){notice("Connector update required",true);return;}
+  if(!selectedCompute()){notice("SSH compute required",true);configure();return;}
   if(datasetImports[split])return;
   const session=storageSession,epoch=datasetConnectionEpoch,revision=++datasetRevision[split];
   const operation={split,revision,epoch,choice:options.choice||"",background,jobID:null,cancelRequested:false};
   if(background&&dialog)operation.onQueued=()=>{if(session===storageSession){$("storage-dialog").close();}};
   datasetImports[split]=operation;
   pendingFiles[split]=null;importingDatasets++;connectionUI(connected);
-  if(dialog){storageStatus("Importing and checking your dataset…");document.querySelectorAll(".storage-object").forEach(b=>b.disabled=true);}
-  $(split+"-detail").textContent=background?"Import queued…":"Importing and checking your dataset…";
+  if(dialog){storageStatus("Importing…");document.querySelectorAll(".storage-object").forEach(b=>b.disabled=true);}
+  $(split+"-detail").textContent=background?"Import queued…":"Importing…";
   try{
     const data=await runDatasetJob(body,operation);
     if(!data||!importOperationCurrent(operation)||(!background&&dialog&&session!==storageSession))return;
@@ -352,8 +352,8 @@ async function importDataset(body,options={}){
     if(dialog&&session===storageSession){$("storage-dialog").close();}clearNotice();
   }catch(error){
     if(importOperationCurrent(operation)){
-      const message=error.cancelled?"Import cancelled.":importErrorMessage(error);
-      $(split+"-detail").textContent=(error.cancelled?"":"Import failed · ")+message;
+      const message=error.cancelled?"Import cancelled":importErrorMessage(error);
+      $(split+"-detail").textContent=error.cancelled||message==="Import failed"?message:"Import failed · "+message;
       if(dialog&&session===storageSession)storageStatus(message,!error.cancelled);
       else if(!error.cancelled)notice(message,true);
     }
@@ -361,11 +361,11 @@ async function importDataset(body,options={}){
   finally{
     if(datasetImports[split]===operation)datasetImports[split]=null;
     importingDatasets--;connectionUI(connected);
-    if(epoch!==datasetConnectionEpoch&&revision===datasetRevision[split])$(split+"-detail").textContent=files[split]?datasetDetail(files[split]):"Choose a dataset after reconnecting";
+    if(epoch!==datasetConnectionEpoch&&revision===datasetRevision[split])$(split+"-detail").textContent=files[split]?datasetDetail(files[split]):"Reconnect to select dataset";
     if(dialog&&session===storageSession){renderStorageRows();}
   }
 }
-function importErrorMessage(error){return typeof error?.message==="string"&&error.message.trim()?error.message:"The dataset could not be imported.";}
+function importErrorMessage(error){return typeof error?.message==="string"&&error.message.trim()?error.message:"Import failed";}
 function formatImportBytes(bytes){
   if(!Number.isFinite(bytes)||bytes<0)return "0 B";
   const unit=bytes>=1024**3?"GiB":bytes>=1024**2?"MiB":bytes>=1024?"KiB":"B",divisor={GiB:1024**3,MiB:1024**2,KiB:1024,B:1}[unit];
@@ -385,14 +385,14 @@ function importProgress(operation,job){
 }
 async function runDatasetJob(body,operation){
   const compute=body.compute||selectedCompute();
-  if(!compute)throw new Error("Configure your SSH compute before importing datasets.");
+  if(!compute)throw new Error("SSH compute required");
   if(body.key&&/\.(csv|tsv)(\.gz)?$/i.test(body.key)){
     const format=$(operation.annotation?"annotations-table-format":"table-format").value||"auto";
     if(format!=="auto")body={...body,table_format:format};
     else if(/(?:^|\/)clusters?[_-](30|90|98)\.tsv(\.gz)?$/i.test(body.key))body={...body,table_format:"mmseqs_cluster"};
   }
   const queued=await api("/api/imports",{...body,compute});
-  if(!/^[a-f0-9]{32}$/.test(queued.id||""))throw new Error("The connector returned an invalid import reference.");
+  if(!/^[a-f0-9]{32}$/.test(queued.id||""))throw new Error("Invalid import reference");
   operation.jobID=queued.id;
   if(!importOperationCurrent(operation))return null;
   importProgress(operation,queued);
@@ -405,14 +405,14 @@ async function runDatasetJob(body,operation){
     if(!importOperationCurrent(operation))return null;
     importProgress(operation,job);
     if(job.status==="completed"){
-      if(!job.dataset?.id)throw new Error("The completed import did not contain a dataset.");
+      if(!job.dataset?.id)throw new Error("Imported dataset missing");
       return job.dataset;
     }
     if(job.status==="failed"||job.status==="cancelled"){
-      const error=new Error(job.message||(job.status==="cancelled"?"Import cancelled.":"The dataset could not be imported."));
+      const error=new Error(job.message||(job.status==="cancelled"?"Import cancelled":"Import failed"));
       error.cancelled=job.status==="cancelled";throw error;
     }
-    if(!["queued","running"].includes(job.status))throw new Error("The connector returned an invalid import status.");
+    if(!["queued","running"].includes(job.status))throw new Error("Invalid import status");
   }
   return null;
 }
@@ -430,15 +430,15 @@ function openAnnotations(split){
   if(!connected||!backgroundDatasetImports||!sequence||datasetImports[split])return;
   annotationDialogState={split,sequence,epoch:datasetConnectionEpoch,revision:datasetRevision[split],annotations:null,choice:""};
   const rows=annotationTableRows();
-  $("annotations-dataset-select").innerHTML='<option value="">Choose an annotation table</option>'+rows.map(row=>`<option value="${esc(row.value)}">${esc(row.store.name)} · ${esc(row.object.key)}</option>`).join("");
+  $("annotations-dataset-select").innerHTML='<option value="">Select file</option>'+rows.map(row=>`<option value="${esc(row.value)}">${esc(row.store.name)} · ${esc(row.object.key)}</option>`).join("");
   $("annotations-dataset-select").value="";
   $("annotations-table-format").value="auto";
   $("annotations-base-id").innerHTML=sequence.columns.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join("");
   $("annotations-base-id").value=sequence.columns.find(c=>/^(protein_id|id|accession|acc)$/i.test(c))||"";
   $("annotations-allow-extra").checked=false;
-  $("annotations-id-column").innerHTML='<option value="">Import a table first</option>';
-  $("annotations-status").textContent=rows.length?"Attach a metadata table or protein FASTA by matching IDs. Its columns will be available as targets.":"No metadata or sequence files found. Refresh your dataset choices.";
-  $("annotations-dialog-title").textContent="Add metadata or sequences";
+  $("annotations-id-column").innerHTML='<option value="">No file imported</option>';
+  $("annotations-status").textContent=rows.length?"Select metadata / sequences":"No metadata / sequence files · Refresh required";
+  $("annotations-dialog-title").textContent="Metadata / sequences";
   renderAnnotationControls();$("annotations-dialog").showModal();
 }
 function annotationContextCurrent(context){return !!context&&connected&&context.epoch===datasetConnectionEpoch&&files[context.split]===context.sequence&&datasetRevision[context.split]===context.revision;}
@@ -477,21 +477,21 @@ async function annotationJob(context,body,join){
     const dataset=await runDatasetJob(body,operation);
     if(!dataset||!importOperationCurrent(operation)||!annotationContextCurrent(context))return;
     if(join){
-      if(dataset.kind==="fasta")throw new Error("The annotation join did not produce a labeled table.");
+      if(dataset.kind==="fasta")throw new Error("Metadata join failed");
       acceptDataset(split,dataset);context.revision=datasetRevision[split];
       if(annotationDialogState===context)$("annotations-dialog").close();
     }else{
       context.annotations=dataset;
       if(annotationDialogState===context){
-        $("annotations-id-column").innerHTML='<option value="">Choose the protein ID column</option>'+dataset.columns.map(column=>`<option value="${esc(column)}">${esc(column)}</option>`).join("");
+        $("annotations-id-column").innerHTML='<option value="">Select ID column</option>'+dataset.columns.map(column=>`<option value="${esc(column)}">${esc(column)}</option>`).join("");
         $("annotations-id-column").value=dataset.columns.find(column=>/^(id|protein_id|accession)$/i.test(column))||"";
-        $("annotations-status").textContent=dataset.rows.toLocaleString()+" rows imported. Match the protein ID columns, then attach. Existing columns and row order are preserved.";
+        $("annotations-status").textContent=dataset.rows.toLocaleString()+" rows imported";
       }
       $(split+"-detail").textContent=datasetDetail(context.sequence);
     }
   }catch(error){
     if(importOperationCurrent(operation)){
-      const message=error.cancelled?"Import cancelled.":importErrorMessage(error);
+      const message=error.cancelled?"Import cancelled":importErrorMessage(error);
       $(split+"-detail").textContent=datasetDetail(context.sequence);
       if(annotationDialogState===context)$("annotations-status").textContent=message;
       if(!error.cancelled)notice(message,true);
@@ -514,7 +514,7 @@ function storageCredentialsUI(){
   document.querySelectorAll(".store-env").forEach(el=>el.classList.toggle("hidden",method!=="env"));
   document.querySelectorAll(".store-profile").forEach(el=>el.classList.toggle("hidden",method!=="profile"));
   $("store-advanced-auth-note").classList.toggle("hidden",direct);$("store-credential-help").classList.toggle("hidden",!direct);
-  $("store-capability-note").textContent=direct&&!supported?"Update your connector to connect with access keys.":"Credentials go only to your local connector.";
+  $("store-capability-note").textContent=direct&&!supported?"Connector update required for access keys":"";
   $("save-storage").disabled=storageConnecting||(direct&&!supported);
 }
 function storageProviderDefaults(){
@@ -541,9 +541,9 @@ async function connectStorage(event){
   if(method==="direct")Object.assign(body,{access_key_id:$("store-access_key_id").value.trim(),secret_access_key:$("store-secret_access_key").value,session_token:$("store-session_token").value,remember_credentials:$("store-remember").checked});
   clearStorageCredentials();
   if(storageConnecting)return;
-  if(method==="direct"&&!storageAuthMethods.includes("direct")){storageStatus("Update your connector to connect with access keys.",true);return;}
-  if(!body.server||!body.path){storageConnectionTab("connection");storageStatus("Enter the server and a path beginning with your bucket name.",true);return;}
-  if(method==="direct"&&(!body.access_key_id||!body.secret_access_key)){storageConnectionTab("connection");storageStatus("Enter an Access Key ID and Secret Access Key.",true);return;}
+  if(method==="direct"&&!storageAuthMethods.includes("direct")){storageStatus("Connector update required for access keys",true);return;}
+  if(!body.server||!body.path){storageConnectionTab("connection");storageStatus("Server and /bucket/path required",true);return;}
+  if(method==="direct"&&(!body.access_key_id||!body.secret_access_key)){storageConnectionTab("connection");storageStatus("Access Key ID and Secret Access Key required",true);return;}
   if(method!=="direct"){
     const parts=body.path.replace(/^\/+/,"").split("/");
     body.endpoint_url=/^https:\/\//i.test(body.server)?body.server:"https://"+body.server;body.bucket=parts.shift();body.prefix=parts.join("/");
@@ -552,13 +552,13 @@ async function connectStorage(event){
     if(method==="profile")body.aws_profile=$("store-aws_profile").value.trim()||"default";
     else for(const field of ["access_key_env","secret_key_env","session_token_env"])body[field]=$("store-"+field).value.trim();
   }
-  const session=storageSession;storageConnecting=true;storageCredentialsUI();storageStatus("Connecting to your storage…");
+  const session=storageSession;storageConnecting=true;storageCredentialsUI();storageStatus("Connecting…");
   try{
     const result=await api(method==="direct"?"/api/storage/connect":"/api/storage/profile",body);
     if(session!==storageSession)return;
     stores=[...stores.filter(p=>p.id!==result.profile.id),result.profile];renderStores();$("storage-select").value=result.profile.id;$("storage-prefix").value=result.profile.prefix||"";
     $("storage-settings").open=false;resetStorageListing();
-    if(method==="direct"){storageRows=result.objects||[];storageNext=result.next_token||null;seedDatasetCatalog(result.profile,result);renderStorageRows();storageStatus("Connected. Choose a dataset to import.");}
+    if(method==="direct"){storageRows=result.objects||[];storageNext=result.next_token||null;seedDatasetCatalog(result.profile,result);renderStorageRows();storageStatus("Connected");}
     else await listStorage();
     syncDatasetCatalog();
   }catch(error){if(session===storageSession)storageStatus(error.message,true);}
@@ -571,10 +571,10 @@ async function finishConnection(value){
   $("service-token").value=token;if($("connection-dialog").open)$("connection-dialog").close();clearNotice();await uploadPendingFiles();scheduleSummary();
 }
 async function startPairing(){
-  if(localPage){try{const r=await fetch(base+"/api/bootstrap");if(!r.ok)throw new Error();await finishConnection((await r.json()).token);}catch(error){$("pair-status").textContent="Start your connector and try again.";}return;}
+  if(localPage){try{const r=await fetch(base+"/api/bootstrap");if(!r.ok)throw new Error();await finishConnection((await r.json()).token);}catch(error){$("pair-status").textContent="Start connector · Retry";}return;}
   pairingState=randomID();clearTimeout(pairingTimer);pairingWindow=window.open(base+"/connect?state="+encodeURIComponent(pairingState),"foldguard-connect-"+pairingState,"popup,width=600,height=680");
-  $("pair-status").textContent=pairingWindow?"Allow this site in the local window. If it cannot open, start your connector and try again.":"Your browser blocked the local window. Allow popups for this site and try again.";
-  pairingTimer=setTimeout(()=>{pairingState="";$("pair-status").textContent="The connection window expired. Start your connector and try again.";},180000);
+  $("pair-status").textContent=pairingWindow?"Local approval required":"Popup blocked · Allow popups and retry";
+  pairingTimer=setTimeout(()=>{pairingState="";$("pair-status").textContent="Approval expired · Retry";},180000);
 }
 window.addEventListener("message",async event=>{
   if(!pairingWindow||![new URL(base).origin,location.origin].includes(event.origin)||event.source!==pairingWindow||!pairingState||event.data?.type!=="foldguard:paired"||event.data.state!==pairingState||!validConnectionToken(event.data.token))return;
@@ -584,7 +584,7 @@ window.addEventListener("message",async event=>{
     await finishConnection(event.data.token);
     try{popup.postMessage({type:"foldguard:pair-ack",state},event.origin);popup.close();}catch(error){/* Connection already verified; a closed popup needs no acknowledgment. */}
     if(pairingWindow===popup)pairingWindow=null;
-  }catch(error){connectionUI(false);$("pair-status").textContent="Could not connect. "+error.message;notice(error.message,true);}
+  }catch(error){connectionUI(false);$("pair-status").textContent="Connection failed · "+error.message;notice(error.message,true);}
 });
 function receivePairingFragment(){
   const fragment=new URLSearchParams(location.hash.slice(1));if(!fragment.has("connect_token"))return false;
@@ -601,46 +601,46 @@ function preferredCompute(data){
 }
 function renderCompute(){
   const p=profiles.find(p=>p.id===selectedCompute()),check=checks[selectedCompute()];
-  $("compute-name").textContent=p?.name||"Your SSH compute";
-  $("compute-destination").textContent=p?.host?(p.host+(p.kind==="slurm"?" · Slurm":" · SSH")):"Connect in your terminal, then configure this workspace.";
-  $("compute-status").textContent=check?.ok?"● Connection checked":p?.workspace_configured?"Connection not checked":"Setup required";
+  $("compute-name").textContent=p?.name||"SSH compute";
+  $("compute-destination").textContent=p?.host?(p.host+(p.kind==="slurm"?" · Slurm":" · SSH")):"Not configured";
+  $("compute-status").textContent=check?.ok?"● Connected":p?.workspace_configured?"Not checked":"Setup required";
   $("compute-status").classList.toggle("ready",!!check?.ok);
 }
 function configure(identifier=selectedCompute()){
-  if(!connected){notice("Connect the companion service to configure compute.",true);showConnection();return;}
+  if(!connected){notice("Connector disconnected",true);showConnection();return;}
   activeProfile=profiles.find(p=>p.id===identifier&&p.kind!=="local")||profiles.find(p=>p.id==="ssh-gpu")||{id:"ssh-gpu",name:"My compute",kind:"ssh",device:"cuda",cpus:4,minutes:60,memory_gb:24};
-  $("compute-dialog-title").textContent="Connect your compute";
+  $("compute-dialog-title").textContent="SSH compute";
   for(const field of ["id","name","host","python","work_dir","model_dir","device","cpus","partition","minutes","memory_gb","ssh_socket"]){$("profile-"+field).value=activeProfile[field]??"";}
-  for(const key of ["python","model_dir"]){$("profile-"+key).required=!activeProfile.assets_configured;$("profile-"+key).placeholder=activeProfile.assets_configured?"Configured by operator; leave blank to keep":"Enter the operator-provided path";}
-  $("profile-work_dir").required=!activeProfile.workspace_configured;$("profile-work_dir").placeholder=activeProfile.workspace_configured?"Configured by operator; leave blank to keep":"/absolute/path/to/foldguard-workspace";
+  for(const key of ["python","model_dir"]){$("profile-"+key).required=!activeProfile.assets_configured;$("profile-"+key).placeholder=activeProfile.assets_configured?"Configured · Leave blank to keep":"Required path";}
+  $("profile-work_dir").required=!activeProfile.workspace_configured;$("profile-work_dir").placeholder=activeProfile.workspace_configured?"Configured · Leave blank to keep":"/absolute/path/to/foldguard-workspace";
   $("profile-slurm").checked=activeProfile.kind==="slurm";
   $("profile-preset").value=activeProfile.host?.endsWith("adroit.princeton.edu")?"adroit":"custom";
   computeSchedulerUI();terminalCommandUI();
-  $("profile-check").textContent="Sign in from your local terminal. Your SSH session handles authentication; datasets go directly from storage to this compute.";
+  $("profile-check").textContent="";
   $("profile-check").className="profile-check";
   $("compute-dialog").showModal();
 }
 function computeSchedulerUI(){document.querySelectorAll(".slurm-field").forEach(e=>e.classList.toggle("hidden",!$("profile-slurm").checked));}
 async function terminalCommandUI(){
   const revision=++terminalCommandRevision,host=$("profile-host").value.trim();
-  $("ssh-terminal-note").textContent="Run this command in your local terminal and complete any password or university sign-in there. Keep the connection available while using your workspace.";
+  $("ssh-terminal-note").textContent="Terminal sign-in required";
   $("copy-ssh-command").disabled=true;
-  if(!/^(?:[a-zA-Z0-9_][a-zA-Z0-9_.-]*@)?[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(host)){$("ssh-terminal-command").textContent="Enter your SSH host above to get the terminal command.";return;}
-  $("ssh-terminal-command").textContent="Preparing your terminal command…";
+  if(!/^(?:[a-zA-Z0-9_][a-zA-Z0-9_.-]*@)?[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(host)){$("ssh-terminal-command").textContent="SSH host required";return;}
+  $("ssh-terminal-command").textContent="Preparing command…";
   try{
     const result=await api("/api/compute/terminal-command",profileForm());
     if(revision!==terminalCommandRevision)return;
     if(typeof result.command!=="string"||!result.command.startsWith("ssh "))throw new Error();
     $("ssh-terminal-command").textContent=result.command;$("copy-ssh-command").disabled=false;
-    if(typeof result.note==="string")$("ssh-terminal-note").textContent=result.note;
-  }catch(error){if(revision===terminalCommandRevision)$("ssh-terminal-command").textContent="Check the connection fields above to create your terminal command.";}
+    if(typeof result.note==="string"&&/transfer node/i.test(result.note))$("ssh-terminal-note").textContent="Main + transfer node sign-in required";
+  }catch(error){if(revision===terminalCommandRevision)$("ssh-terminal-command").textContent="Check SSH settings";}
 }
 function computePreset(){
   const adroit=$("profile-preset").value==="adroit";
   const preset=adroit?profiles.find(p=>p.id==="adroit"):profiles.find(p=>p.id==="ssh-gpu");
   if(preset){activeProfile=preset;for(const field of ["id","name","host","python","work_dir","model_dir","device","cpus","partition","minutes","memory_gb","ssh_socket"]){$("profile-"+field).value=preset[field]??"";}}
   else{$("profile-name").value=adroit?"Adroit":"My compute";$("profile-host").value=adroit?"adroit.princeton.edu":"";}
-  for(const key of ["python","model_dir"]){$("profile-"+key).required=!activeProfile.assets_configured;$("profile-"+key).placeholder=activeProfile.assets_configured?"Configured by operator; leave blank to keep":"Enter the operator-provided path";}
+  for(const key of ["python","model_dir"]){$("profile-"+key).required=!activeProfile.assets_configured;$("profile-"+key).placeholder=activeProfile.assets_configured?"Configured · Leave blank to keep":"Required path";}
   $("profile-work_dir").required=!activeProfile.workspace_configured;
   $("profile-slurm").checked=adroit;computeSchedulerUI();terminalCommandUI();
 }
@@ -652,7 +652,7 @@ function profileForm(){
 }
 function renderRuns(){
   $("run-count").textContent=runs.length;
-  $("runs-list").innerHTML=runs.length?runs.map(r=>`<article class="run-card"><div><h2>${esc(r.name)}</h2><p>${runTaskType(r)==="regression"?"Continuous value":"Discrete categories"} · ${esc(r.compute)} · ${r.summary.train_rows.toLocaleString()} train / ${r.summary.test_rows.toLocaleString()} test · ${new Date(r.created_at*1000).toLocaleString()}</p></div><div><span class="pill ${esc(r.status)}">${esc(r.status)}</span><button data-open-run="${r.id}">View run ↗</button></div></article>`).join(""):`<div class="empty-list">Your model runs will appear here once you launch one.</div>`;
+  $("runs-list").innerHTML=runs.length?runs.map(r=>`<article class="run-card"><div><h2>${esc(r.name)}</h2><p>${runTaskType(r)==="regression"?"Continuous value":"Discrete categories"} · ${esc(r.compute)} · ${r.summary.train_rows.toLocaleString()} train / ${r.summary.test_rows.toLocaleString()} test · ${new Date(r.created_at*1000).toLocaleString()}</p></div><div><span class="pill ${esc(r.status)}">${esc(r.status)}</span><button data-open-run="${r.id}">View run ↗</button></div></article>`).join(""):`<div class="empty-list">No runs</div>`;
   document.querySelectorAll("[data-open-run]").forEach(b=>b.addEventListener("click",async()=>{currentRun=b.dataset.openRun;previousView=null;selectedLoss="";changeView("builder");await refreshRun();window.scrollTo({top:0,behavior:"smooth"});}));
 }
 function plot(series,{xLabel="Training step",yLabel="Loss",diagonal=false,percentage=false}={}){
@@ -699,7 +699,7 @@ function renderLoss(events,view=previousView){
   $("loss-validation-legend").classList.add("hidden");
   if(!losses.length){
     selectedLoss="";$("loss-series").innerHTML='<option value="">Waiting for training</option>';$("loss-series").value="";
-    $("loss-chart").className="chart-placeholder";$("loss-chart").innerHTML='<span class="chart-ghost">╱╲__</span><p>Live loss, once training starts.</p>';
+    $("loss-chart").className="chart-placeholder";$("loss-chart").innerHTML='<span class="chart-ghost">╱╲__</span><p>Pending</p>';
     return;
   }
   const keys=[...new Set(losses.map(e=>e.series))];
@@ -719,11 +719,11 @@ function renderLoss(events,view=previousView){
   $("loss-train-value").textContent=liveMetricText(latest?.[trainKey],metric);
   $("loss-validation-value").textContent=liveMetricText(latest?.[validationKey],metric);
   $("loss-chart").className="";$("loss-chart").innerHTML=plot(series,{yLabel:metric.axis,percentage:metric.percentage});
-  if(!$("loss-chart").innerHTML)$("loss-chart").innerHTML='<p class="small">This metric is unavailable for the selected pass.</p>';
+  if(!$("loss-chart").innerHTML)$("loss-chart").innerHTML='<p class="small">Metric unavailable</p>';
 }
 function predictionScatter(rawPoints){
   const points=(rawPoints||[]).filter(p=>Array.isArray(p)&&p.length===2&&p.every(Number.isFinite));
-  if(!points.length)return '<p class="small">Prediction points are unavailable.</p>';
+  if(!points.length)return '<p class="small">Predictions unavailable</p>';
   const W=350,H=235,L=53,R=15,T=25,B=43;
   const values=points.flat(),scale=Math.max(1,...values.map(Math.abs));
   const normalized=values.map(v=>v/scale),min=Math.min(...normalized),max=Math.max(...normalized);
@@ -742,8 +742,8 @@ function predictionScatter(rawPoints){
 function regressionMetrics(r){
   const m=r.metrics,d=r.dataset,baseline=m.baseline||r.baseline;
   const cards=[["RMSE",m.rmse],["Mean absolute error",m.mae],["R²",m.r2],["Pearson correlation",m.pearson]].map(([label,value])=>`<div><small>${label}</small><strong${Number.isFinite(value)?"":' class="undefined-metric"'}>${esc(numberText(value))}</strong></div>`).join("");
-  const comparison=baseline?`<details class="result-details"><summary>Training-mean baseline</summary><p class="table-caption">Predicting the training-set mean for every test protein.</p><div class="table-wrap"><table><thead><tr><th>Metric</th><th>Your model</th><th>Baseline</th></tr></thead><tbody>${[["RMSE","rmse"],["Mean absolute error","mae"],["R²","r2"]].map(([name,key])=>`<tr><td>${name}</td><td>${esc(numberText(m[key]))}</td><td>${esc(numberText(baseline[key]))}</td></tr>`).join("")}</tbody></table></div></details>`:"";
-  return `<div class="metric-grid">${cards}</div><div class="metric-note">${d.test_rows.toLocaleString()} proteins in the supplied test set · Continuous value<br>${separationSummary(d)}<br>${r.training_limit_reached?"Training reached its configured limit":"Training complete"}</div><div class="prediction-heading">Predicted versus actual</div><div id="prediction-chart">${predictionScatter(m.prediction_points)}</div><p class="table-caption">Dashed line: perfect agreement. Lower error is better; R² and correlation can be undefined when values are constant.</p>${comparison}`;
+  const comparison=baseline?`<details class="result-details"><summary>Training-mean baseline</summary><div class="table-wrap"><table><thead><tr><th>Metric</th><th>Your model</th><th>Baseline</th></tr></thead><tbody>${[["RMSE","rmse"],["Mean absolute error","mae"],["R²","r2"]].map(([name,key])=>`<tr><td>${name}</td><td>${esc(numberText(m[key]))}</td><td>${esc(numberText(baseline[key]))}</td></tr>`).join("")}</tbody></table></div></details>`:"";
+  return `<div class="metric-grid">${cards}</div><div class="metric-note">${d.test_rows.toLocaleString()} test proteins · Continuous value<br>${separationSummary(d)}<br>${r.training_limit_reached?"Training limit reached":"Complete"}</div><div class="prediction-heading">Predicted versus actual</div><div id="prediction-chart">${predictionScatter(m.prediction_points)}</div>${comparison}`;
 }
 function renderMetrics(view){
   const r=view.result;
@@ -752,8 +752,8 @@ function renderMetrics(view){
   if(renderedResultRun===view.id)return;
   renderedResultRun=view.id;
   const m=r.metrics,d=r.dataset,continuous=runTaskType(view)==="regression",classes=d.classes||[];
-  const classification=`<div class="metric-grid"><div><small>AUROC${classes.length>2?" · macro OVR":""}</small><strong>${Number.isFinite(m.auroc)?m.auroc.toFixed(4):"Not defined"}</strong></div><div><small>Balanced accuracy</small><strong>${Number.isFinite(m.balanced_accuracy)?(m.balanced_accuracy*100).toFixed(1):"Not defined"}<span class="small">%</span></strong></div><div><small>Macro F1</small><strong>${Number.isFinite(m.macro_f1)?m.macro_f1.toFixed(3):"Not defined"}</strong></div><div><small>Average precision</small><strong>${Number.isFinite(m.average_precision)?m.average_precision.toFixed(3):"Not defined"}</strong></div></div><div class="metric-note">${d.test_rows.toLocaleString()} proteins in the supplied test set · ${esc(m.auroc_definition)}<br>${separationSummary(d)}<br>${r.training_limit_reached?"Training reached its configured limit":"Training complete"}</div><div class="curve-controls"><label>ROC curve<select id="roc-class">${classes.map((c,i)=>`<option value="${esc(c)}"${i===(classes.length===2?1:0)?" selected":""}>${esc(c)}</option>`).join("")}</select></label></div><div id="roc-chart"></div><details class="result-details"><summary>Confusion matrix &amp; class metrics</summary><div class="table-wrap"><table><thead><tr><th>Actual ↓ / predicted →</th>${classes.map(c=>`<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>${(m.confusion_matrix||[]).map((row,i)=>`<tr><th>${esc(classes[i])}</th>${row.map(n=>`<td>${n}</td>`).join("")}</tr>`).join("")}</tbody></table></div><div class="table-wrap"><table><thead><tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1</th><th>n</th></tr></thead><tbody>${(m.per_class||[]).map(c=>`<tr><td>${esc(c.label)}</td><td>${c.precision.toFixed(3)}</td><td>${c.recall.toFixed(3)}</td><td>${c.f1.toFixed(3)}</td><td>${c.support}</td></tr>`).join("")}</tbody></table></div><p class="table-caption">Scores are not independently calibrated.</p></details>`;
-  $("metrics-content").innerHTML=(continuous?regressionMetrics(r):classification)+`<div class="result-warning">${evaluationWarnings(d,r.limitations)}</div><button class="primary" id="download-model">Download evaluation report ↓</button>`;
+  const classification=`<div class="metric-grid"><div><small>AUROC${classes.length>2?" · macro OVR":""}</small><strong>${Number.isFinite(m.auroc)?m.auroc.toFixed(4):"Undefined"}</strong></div><div><small>Balanced accuracy</small><strong>${Number.isFinite(m.balanced_accuracy)?(m.balanced_accuracy*100).toFixed(1):"Undefined"}<span class="small">%</span></strong></div><div><small>Macro F1</small><strong>${Number.isFinite(m.macro_f1)?m.macro_f1.toFixed(3):"Undefined"}</strong></div><div><small>Average precision</small><strong>${Number.isFinite(m.average_precision)?m.average_precision.toFixed(3):"Undefined"}</strong></div></div><div class="metric-note">${d.test_rows.toLocaleString()} test proteins · ${esc(m.auroc_definition)}<br>${separationSummary(d)}<br>${r.training_limit_reached?"Training limit reached":"Complete"}</div><div class="curve-controls"><label>ROC curve<select id="roc-class">${classes.map((c,i)=>`<option value="${esc(c)}"${i===(classes.length===2?1:0)?" selected":""}>${esc(c)}</option>`).join("")}</select></label></div><div id="roc-chart"></div><details class="result-details"><summary>Confusion matrix &amp; class metrics</summary><div class="table-wrap"><table><thead><tr><th>Actual ↓ / predicted →</th>${classes.map(c=>`<th>${esc(c)}</th>`).join("")}</tr></thead><tbody>${(m.confusion_matrix||[]).map((row,i)=>`<tr><th>${esc(classes[i])}</th>${row.map(n=>`<td>${n}</td>`).join("")}</tr>`).join("")}</tbody></table></div><div class="table-wrap"><table><thead><tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1</th><th>n</th></tr></thead><tbody>${(m.per_class||[]).map(c=>`<tr><td>${esc(c.label)}</td><td>${c.precision.toFixed(3)}</td><td>${c.recall.toFixed(3)}</td><td>${c.f1.toFixed(3)}</td><td>${c.support}</td></tr>`).join("")}</tbody></table></div><p class="table-caption">Calibration: unverified</p></details>`;
+  $("metrics-content").innerHTML=(continuous?regressionMetrics(r):classification)+`<div class="result-warning">${evaluationWarnings(d,r.limitations)}</div><button class="primary" id="download-model">Evaluation report ↓</button>`;
   if(!continuous){
     const roc=()=>{$("roc-chart").innerHTML=plot([{color:"#6f5fa5",points:m.curves[$("roc-class").value].roc}],{xLabel:"False positive rate",yLabel:"True positive rate",diagonal:true});};
     $("roc-class").addEventListener("change",roc);roc();
@@ -765,7 +765,7 @@ function renderMetrics(view){
 function renderMonitor(view){
   const s=view.status,completed=s.status==="completed";
   $("monitor-name").textContent=view.name;
-  $("monitor-message").textContent=s.message||s.stage;
+  $("monitor-message").textContent=s.status==="failed"?(s.message||"Run failed"):({validating:"Checking datasets",dispatching:"Queued",starting:"Starting",preparing:"Preparing",training:"Training",testing:"Evaluating",completed:"Complete",cancelled:"Cancelled"}[s.stage]||s.status);
   $("run-badge").textContent=s.status;$("run-badge").className="pill "+s.status;
   $("stop-run").classList.toggle("hidden",["completed","failed","cancelled"].includes(s.status));
   const stages=["validating","starting","preparing","training","testing","completed"],index=stages.indexOf(s.stage);
@@ -780,16 +780,16 @@ function renderMonitor(view){
 async function refreshRun(){if(!currentRun||!connected)return;const view=await api("/api/runs/"+currentRun);renderMonitor(view);}
 function applyWorkspaceState(data){
   backgroundDatasetImports=data.remote_dataset_imports===true;maxImportBytes=backgroundDatasetImports?(Number(data.max_import_bytes)||16*1024**3):24*1024**2;datasetFormats=Array.isArray(data.dataset_formats)?data.dataset_formats:["csv","tsv"];
-  $("remote-import-limits").textContent=backgroundDatasetImports?"Storage imports: CSV, TSV, or FASTA, including gzip, up to "+formatImportBytes(maxImportBytes)+" per file. Files go directly from storage to your SSH compute.":"Update your connector to import directly to your SSH compute. Files remain in storage until you import them.";
+  $("remote-import-limits").textContent=backgroundDatasetImports?"CSV / TSV / FASTA · "+formatImportBytes(maxImportBytes)+" max":"Connector update required";
   profiles=data.profiles;const nextCompute=preferredCompute(data);if(selectedComputeID&&nextCompute!==selectedComputeID){files.train=null;files.test=null;readyValidationID="";validationRevision++;}selectedComputeID=nextCompute;runs=data.runs;checks=data.checks;stores=data.stores||[];supportedTaskTypes=Array.isArray(data.task_types)?data.task_types:["classification"];storageAuthMethods=Array.isArray(data.storage_auth_methods)?data.storage_auth_methods:[];connectionUI(true);taskTypeHelp();storageCredentialsUI();renderCompute();renderRuns();
   $("curated-target-note").classList.toggle("hidden",!stores.some(s=>s.curated));
-  if(stores.some(s=>s.curated))$("remote-import-limits").textContent="Demo-sized samples from 1,424,494 annotated viral proteins. Select a 90% or 30% protein-cluster holdout; every imported sample includes matched sequences and metadata. Original archives stay in R2.";
+  if(stores.some(s=>s.curated))$("remote-import-limits").textContent="";
   syncDatasetCatalog();
 }
 async function refresh(){
   if(polling||!token)return;polling=true;
   try{const data=await api("/api/state",undefined,{timeout:15000});applyWorkspaceState(data);await refreshRun();}
-  catch(error){connectionUI(false);if(currentRun)$("progress-caption").textContent="Companion unavailable. Reconnect to refresh this run.";}
+  catch(error){connectionUI(false);if(currentRun)$("progress-caption").textContent="Connector disconnected · Reconnect";}
   finally{polling=false;}
 }
 
@@ -801,7 +801,7 @@ for(const split of ["train","test"]){
   $(split+"-import-cancel").addEventListener("click",()=>cancelDatasetImport(split));
   $(split+"-attach-annotations").addEventListener("click",()=>openAnnotations(split));
 }
-$("annotations-dataset-select").addEventListener("change",()=>{if(annotationDialogState){annotationDialogState.annotations=null;$("annotations-id-column").innerHTML='<option value="">Import a table first</option>';}renderAnnotationControls();});
+$("annotations-dataset-select").addEventListener("change",()=>{if(annotationDialogState){annotationDialogState.annotations=null;$("annotations-id-column").innerHTML='<option value="">No file imported</option>';}renderAnnotationControls();});
 $("annotations-id-column").addEventListener("change",renderAnnotationControls);
 $("annotations-base-id").addEventListener("change",renderAnnotationControls);
 $("annotations-import").addEventListener("click",importAnnotations);
@@ -818,7 +818,7 @@ $("pair-service").addEventListener("click",startPairing);
 document.querySelectorAll("[data-storage-split]").forEach(b=>b.addEventListener("click",()=>openStorage(b.dataset.storageSplit)));
 $("storage-dialog").addEventListener("close",()=>{clearStorageCredentials();reconnectingStorageID=null;storageSession++;resetStorageListing();});
 $("add-storage").addEventListener("click",newStorageConnection);
-$("storage-select").addEventListener("change",()=>{resetStorageListing();reconnectingStorageID=null;const selected=stores.find(p=>p.id===$("storage-select").value);$("storage-prefix").value=selected?.prefix||"";if(selected?.configured===false){prefillStorageReconnect(selected);$("storage-settings").open=true;storageStatus("Enter your server and access keys to connect this storage.");}else if(selected)listStorage();});
+$("storage-select").addEventListener("change",()=>{resetStorageListing();reconnectingStorageID=null;const selected=stores.find(p=>p.id===$("storage-select").value);$("storage-prefix").value=selected?.prefix||"";if(selected?.configured===false){prefillStorageReconnect(selected);$("storage-settings").open=true;storageStatus("Storage credentials required");}else if(selected)listStorage();});
 $("storage-prefix").addEventListener("input",resetStorageListing);
 $("storage-list-form").addEventListener("submit",e=>{e.preventDefault();listStorage(false);});
 $("storage-more").addEventListener("click",()=>listStorage(true));
@@ -832,16 +832,16 @@ $("configure-compute").addEventListener("click",()=>configure());
 $("profile-slurm").addEventListener("change",computeSchedulerUI);
 $("profile-preset").addEventListener("change",computePreset);
 for(const id of ["profile-host","profile-ssh_socket"])$(id).addEventListener("input",terminalCommandUI);
-$("copy-ssh-command").addEventListener("click",async()=>{try{await navigator.clipboard.writeText($("ssh-terminal-command").textContent);$("profile-check").textContent="Command copied. Run it in your local terminal, complete sign-in, then test the connection here.";}catch(error){$("profile-check").textContent="Select the command above and copy it into your local terminal.";}});
+$("copy-ssh-command").addEventListener("click",async()=>{try{await navigator.clipboard.writeText($("ssh-terminal-command").textContent);$("profile-check").textContent="Copied · Terminal sign-in required";}catch(error){$("profile-check").textContent="Copy command manually";}});
 $("copy-token").addEventListener("click",async()=>{try{await navigator.clipboard.writeText(token);$("copy-token").textContent="Copied ✓";}catch(error){$("service-token").type="text";$("service-token").select();}});
 $("connect-service").addEventListener("click",async()=>{
   const button=$("connect-service");button.disabled=true;
   try{token=$("service-token").value.trim();await api("/api/state",undefined,{timeout:15000});sessionStorage.setItem("foldguard-service-token",token);connectionUI(true);$("connection-dialog").close();clearNotice();await refresh();await uploadPendingFiles();}
-  catch(error){notice("Could not connect. Start the companion service, check the token, and allow local-network access if your browser requests it. "+error.message,true);}
+  catch(error){notice("Connection failed · Check connector, token and local-network access · "+error.message,true);}
   finally{button.disabled=false;}
 });
 $("test-compute").addEventListener("click",async()=>{
-  const button=$("test-compute");button.disabled=true;$("profile-check").className="profile-check";$("profile-check").textContent="Checking compute connection and model assets…";
+  const button=$("test-compute");button.disabled=true;$("profile-check").className="profile-check";$("profile-check").textContent="Checking compute…";
   try{const result=await api("/api/check",profileForm());checks[activeProfile.id]=result;$("profile-check").textContent=(result.ok?"✓ ":"")+result.message+(result.host?" · "+result.host:"");$("profile-check").classList.toggle("error",!result.ok);renderCompute();}
   catch(error){$("profile-check").textContent=error.message;$("profile-check").classList.add("error");}
   finally{button.disabled=false;}
@@ -850,32 +850,32 @@ $("compute-form").addEventListener("submit",async e=>{
   e.preventDefault();
   try{
     const saved=await api("/api/profile",profileForm());
-    for(const split of ["train","test"]){files[split]=null;datasetChoices[split]="";datasetRevision[split]++;$(split+"-filename").textContent="Choose from storage";$(split+"-detail").textContent="Import a dataset to your SSH compute";$(split+"-drop").classList.remove("filled");}
+    for(const split of ["train","test"]){files[split]=null;datasetChoices[split]="";datasetRevision[split]++;$(split+"-filename").textContent="";$(split+"-detail").textContent="";$(split+"-drop").classList.remove("filled");}
     selectedComputeID=saved.id;readyValidationID="";validationRevision++;$("compute-dialog").close();datasetChanged();await refresh();
-    notice("SSH compute saved. Test its connection, then import your datasets directly to it.");
+    notice("Compute saved");
   }catch(error){$("profile-check").textContent=error.message;$("profile-check").classList.add("error");}
 });
 $("launch-run").addEventListener("click",async()=>{
-  if(!connected){showConnection();return;}if(!supportsTask()){notice("Update your connector to use continuous values.",true);return;}if(importingDatasets||pendingFiles.train||pendingFiles.test){notice("Wait for dataset imports to finish.",true);return;}if(!files.train?.id||!files.test?.id){notice("Choose a training set and a test set first.",true);return;}if(files.train.kind==="fasta"||files.test.kind==="fasta"){notice("Attach an annotation table to each FASTA dataset before training.",true);return;}
-  if(!selectedCompute()||!readyValidationID){notice("Wait for the dataset checks on your compute to complete.",true);return;}
-  busy=true;connectionUI(true);$("launch-run").textContent="Checking & launching…";clearNotice();
+  if(!connected){showConnection();return;}if(!supportsTask()){notice("Connector update required for regression",true);return;}if(importingDatasets||pendingFiles.train||pendingFiles.test){notice("Import in progress",true);return;}if(!files.train?.id||!files.test?.id){notice("Training and test sets required",true);return;}if(files.train.kind==="fasta"||files.test.kind==="fasta"){notice("Annotations required for FASTA datasets",true);return;}
+  if(!selectedCompute()||!readyValidationID){notice("Dataset checks pending",true);return;}
+  busy=true;connectionUI(true);$("launch-run").textContent="Launching…";clearNotice();
   try{const response=await api("/api/runs",{...datasetPayload(),
     annotation:mapping().label,name:$("run-name").value.trim()||(mapping().label+" · v1"),compute:selectedCompute(),validation_id:readyValidationID});
-    currentRun=response.id;previousView=null;selectedLoss="";await refresh();notice("Run launched. You can follow its progress here or return to it from Model runs.");}
+    currentRun=response.id;previousView=null;selectedLoss="";await refresh();notice("Run launched");}
   catch(error){notice(error.message,true);}finally{busy=false;$("launch-run").innerHTML='Build &amp; evaluate <span>↗</span>';connectionUI(connected);}
 });
 $("loss-series").addEventListener("change",()=>{selectedLoss=$("loss-series").value;if(previousView)renderLoss(previousView.events);});
 $("loss-metric").addEventListener("change",()=>{if(previousView){selectedLossMetric[lossTaskType(previousView.events,previousView)]=$("loss-metric").value;renderLoss(previousView.events);}});
-$("stop-run").addEventListener("click",async()=>{if(!currentRun)return;try{const result=await api("/api/runs/"+currentRun+"/cancel",{});notice(result.message||"Stop requested.");}catch(error){notice(error.message,true);}});
+$("stop-run").addEventListener("click",async()=>{if(!currentRun)return;try{const result=await api("/api/runs/"+currentRun+"/cancel",{});notice(result.message||"Stop requested");}catch(error){notice(error.message,true);}});
 
 async function initialize(){
   receivePairingFragment();connectionUI(false);renderCompute();renderRuns();
   if(localPage){
     try{const r=await fetch(base+"/api/bootstrap");const data=await r.json();token=data.token;sessionStorage.setItem("foldguard-service-token",token);}
-    catch(error){notice("Start the companion service to use this interface.",true);}
+    catch(error){notice("Start connector",true);}
   }
   await refresh();
-  if(!connected&&!localPage)notice("Connect the local companion service to configure compute and build models. Get the private connector installer from your Foldguard operator, then connect this computer.");
+  if(!connected&&!localPage)notice("Connector disconnected");
   setInterval(()=>{if(!document.hidden)refresh();},4000);
   document.addEventListener("visibilitychange",()=>{if(!document.hidden)refresh();});
 }
