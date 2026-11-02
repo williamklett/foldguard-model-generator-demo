@@ -4,8 +4,8 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="Build and evaluate models for protein annotations.">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' http://127.0.0.1:8773 http://localhost:8773; img-src 'self' data:; object-src 'none'; base-uri 'self'">
-  <title>Foldguard Model Generator</title><link rel="stylesheet" href="./reference.css?v=1.5.0">
-  <script src="./app.js?v=1.5.0" defer></script>
+  <title>Foldguard Model Generator</title><link rel="stylesheet" href="./reference.css?v=1.5.1">
+  <script src="./app.js?v=1.5.1" defer></script>
 </head>
 <body>
 <aside class="sidebar">
@@ -45,7 +45,7 @@
       <div class="launch-panel"><label>Run name<input id="run-name" maxlength="120" placeholder="e.g. Subcellular location · v1"></label><button class="primary" id="launch-run">Build &amp; evaluate <span>↗</span></button></div><p class="privacy-note">Datasets move directly from your storage to your SSH compute. Your computer connects the website to your workspace; it does not store dataset files.</p>
     </div>
     <aside class="results-column"><section class="panel run-panel"><div class="result-top"><div class="tiny-label">RUN MONITOR</div><span id="run-badge" class="pill">Ready when you are</span></div><h2 id="monitor-name">Your next model</h2><p id="monitor-message">Training progress and held-out results will appear here.</p><div class="pipeline-steps" id="pipeline-steps"><div><span>1</span><strong>Prepare your data</strong><small>Dataset checks and model preparation</small></div><div><span>2</span><strong>Train your model</strong><small>Training and internal validation</small></div><div><span>3</span><strong>Evaluate the model</strong><small>Held-out metrics and predictions</small></div></div><div class="progress-track hidden" id="progress-track"><div id="progress-fill"></div></div><p class="progress-caption" id="progress-caption"></p><button class="danger-link hidden" id="stop-run">Stop run</button></section>
-    <section class="panel" id="loss-panel"><div class="result-top"><h2>Loss</h2><select id="loss-series" aria-label="Loss curve run"><option value="">Waiting for training</option></select></div><div id="loss-chart" class="chart-placeholder"><span class="chart-ghost">╱╲__</span><p>Live loss, once training starts.</p></div><div class="legend"><span><i class="train-color"></i>Training</span><span><i class="val-color"></i>Internal validation</span></div></section>
+    <section class="panel" id="loss-panel"><div class="result-top"><h2>Loss</h2><select id="loss-series" aria-label="Loss curve run"><option value="">Waiting for training</option></select></div><div id="loss-chart" class="chart-placeholder"><span class="chart-ghost">╱╲__</span><p>Live loss, once training starts.</p></div><div class="legend"><span><i class="train-color"></i>Training</span><span id="loss-validation-legend" class="hidden"><i class="val-color"></i>Internal validation</span></div></section>
     <section class="panel" id="metrics-panel"><div class="result-top"><h2>Held-out performance</h2><span class="tiny-label">TEST SET</span></div><div id="metrics-empty" class="metrics-empty">No evaluation yet.<p>The test set is scored after the model is locked.</p></div><div id="metrics-content" class="hidden"></div></section>
     </aside></div>
   </section>

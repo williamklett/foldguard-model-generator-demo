@@ -601,7 +601,7 @@ function renderRuns(){
   $("runs-list").innerHTML=runs.length?runs.map(r=>`<article class="run-card"><div><h2>${esc(r.name)}</h2><p>${runTaskType(r)==="regression"?"Continuous value":"Discrete categories"} · ${esc(r.compute)} · ${r.summary.train_rows.toLocaleString()} train / ${r.summary.test_rows.toLocaleString()} test · ${new Date(r.created_at*1000).toLocaleString()}</p></div><div><span class="pill ${esc(r.status)}">${esc(r.status)}</span><button data-open-run="${r.id}">View run ↗</button></div></article>`).join(""):`<div class="empty-list">Your model runs will appear here once you launch one.</div>`;
   document.querySelectorAll("[data-open-run]").forEach(b=>b.addEventListener("click",async()=>{currentRun=b.dataset.openRun;previousView=null;selectedLoss="";changeView("builder");await refreshRun();window.scrollTo({top:0,behavior:"smooth"});}));
 }
-function plot(series,{xLabel="Training step",yLabel="Log loss",diagonal=false}={}){
+function plot(series,{xLabel="Training step",yLabel="Loss",diagonal=false}={}){
   const W=350,H=180,L=40,R=12,T=24,B=30;
   const points=series.flatMap(s=>s.points).filter(p=>p.every(Number.isFinite));
   if(!points.length)return "";
@@ -617,7 +617,12 @@ function plot(series,{xLabel="Training step",yLabel="Log loss",diagonal=false}={
 }
 function renderLoss(events,view=previousView){
   const losses=events.filter(e=>e.event==="loss");
-  if(!losses.length)return;
+  $("loss-validation-legend").classList.add("hidden");
+  if(!losses.length){
+    selectedLoss="";$("loss-series").innerHTML='<option value="">Waiting for training</option>';$("loss-series").value="";
+    $("loss-chart").className="chart-placeholder";$("loss-chart").innerHTML='<span class="chart-ghost">╱╲__</span><p>Live loss, once training starts.</p>';
+    return;
+  }
   const keys=[...new Set(losses.map(e=>e.series))];
 
   $("loss-series").innerHTML=keys.map(key=>`<option value="${esc(key)}">${esc(key)}</option>`).join("");
@@ -625,10 +630,11 @@ function renderLoss(events,view=previousView){
   $("loss-series").value=chosen;
   const data=losses.filter(e=>e.series===chosen);
   const series=[{color:"#3f7a3a",points:data.map(e=>[e.step,e.train_loss])}];
-  const val=data.filter(e=>e.validation_loss!==null);
+  const val=data.filter(e=>Number.isFinite(e.validation_loss));
   if(val.length)series.push({color:"#6f5fa5",points:val.map(e=>[e.step,e.validation_loss])});
+  $("loss-validation-legend").classList.toggle("hidden",!val.length);
   const continuous=data.some(e=>e.loss_metric==="mse")||(!data.some(e=>e.loss_metric==="log_loss")&&runTaskType(view)==="regression");
-  $("loss-chart").className="";$("loss-chart").innerHTML=plot(series,{yLabel:continuous?"Mean squared error":"Log loss"});
+  $("loss-chart").className="";$("loss-chart").innerHTML=plot(series,{yLabel:continuous?"Mean squared error":"Loss"});
 }
 function predictionScatter(rawPoints){
   const points=(rawPoints||[]).filter(p=>Array.isArray(p)&&p.length===2&&p.every(Number.isFinite));
@@ -683,9 +689,7 @@ function renderMonitor(view){
   $("progress-track").classList.remove("hidden");$("progress-fill").style.width=percent+"%";
   $("progress-caption").textContent=view.compute+(view.dispatch.job_id?" · Job "+view.dispatch.job_id:"")+(s.stage==="preparing"?" · "+(s.completed||0)+" / "+s.total+" proteins":"");
   if(view.connection_error)$("progress-caption").textContent+=" · Connection interrupted: "+view.connection_error.message;
-  const losses=view.events.filter(e=>e.event==="loss");
-  if(!losses.length){$("loss-series").innerHTML='<option value="">Waiting for training</option>';$("loss-chart").className="chart-placeholder";$("loss-chart").innerHTML='<span class="chart-ghost">╱╲__</span><p>Live loss, once training starts.</p>';}
-  else renderLoss(view.events,view);
+  renderLoss(view.events,view);
   renderMetrics(view);previousView=view;
 }
 async function refreshRun(){if(!currentRun||!connected)return;const view=await api("/api/runs/"+currentRun);renderMonitor(view);}
