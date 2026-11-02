@@ -9,6 +9,7 @@ let supportedTaskTypes = ["classification"], storageAuthMethods = [];
 let backgroundDatasetImports = false, maxImportBytes = 24*1024**2, datasetFormats = ["csv","tsv"];
 let annotationDialogState = null, selectedComputeID = "", readyValidationID = "", terminalCommandRevision = 0;
 let polling = false, busy = false, selectedLoss = "", previousView = null;
+const selectedLossMetric = {classification:"loss",regression:"loss"};
 const files = {train:null,test:null};
 let summaryTimer, renderedResultRun = null, validationRevision = 0;
 const datasetRevision = {train:0,test:0}, pendingFiles = {train:null,test:null};
@@ -654,22 +655,47 @@ function renderRuns(){
   $("runs-list").innerHTML=runs.length?runs.map(r=>`<article class="run-card"><div><h2>${esc(r.name)}</h2><p>${runTaskType(r)==="regression"?"Continuous value":"Discrete categories"} · ${esc(r.compute)} · ${r.summary.train_rows.toLocaleString()} train / ${r.summary.test_rows.toLocaleString()} test · ${new Date(r.created_at*1000).toLocaleString()}</p></div><div><span class="pill ${esc(r.status)}">${esc(r.status)}</span><button data-open-run="${r.id}">View run ↗</button></div></article>`).join(""):`<div class="empty-list">Your model runs will appear here once you launch one.</div>`;
   document.querySelectorAll("[data-open-run]").forEach(b=>b.addEventListener("click",async()=>{currentRun=b.dataset.openRun;previousView=null;selectedLoss="";changeView("builder");await refreshRun();window.scrollTo({top:0,behavior:"smooth"});}));
 }
-function plot(series,{xLabel="Training step",yLabel="Loss",diagonal=false}={}){
+function plot(series,{xLabel="Training step",yLabel="Loss",diagonal=false,percentage=false}={}){
   const W=350,H=180,L=40,R=12,T=24,B=30;
   const points=series.flatMap(s=>s.points).filter(p=>p.every(Number.isFinite));
   if(!points.length)return "";
-  const xmax=Math.max(1,...points.map(p=>p[0])),ymax=Math.max(.01,...points.map(p=>p[1]))*1.07;
+  const xmax=Math.max(1,...points.map(p=>p[0])),ymax=percentage?100:Math.max(.01,...points.map(p=>p[1]))*1.07;
   const x=v=>L+(W-L-R)*v/xmax,y=v=>H-B-(H-T-B)*v/ymax;
   let svg=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(yLabel)} versus ${esc(xLabel)}"><text class="plot-label" x="${L}" y="10">${esc(yLabel)}</text>`;
-  for(let i=0;i<=3;i++){const value=ymax*i/3;svg+=`<path d="M${L} ${y(value)}H${W-R}" stroke="#c6c2b8" fill="none"/><text class="plot-label" x="${L-7}" y="${y(value)+3}" text-anchor="end">${value.toFixed(2)}</text>`;}
+  for(let i=0;i<=3;i++){const value=ymax*i/3;svg+=`<path d="M${L} ${y(value)}H${W-R}" stroke="#c6c2b8" fill="none"/><text class="plot-label" x="${L-7}" y="${y(value)+3}" text-anchor="end">${percentage?value.toFixed(0)+"%":value.toFixed(2)}</text>`;}
   for(let i=0;i<=4;i++){const value=xmax*i/4;svg+=`<text class="plot-label" x="${x(value)}" y="${H-B+15}" text-anchor="middle">${Number.isInteger(xmax)?Math.round(value):value.toFixed(1)}</text>`;}
   if(diagonal)svg+=`<path d="M${x(0)} ${y(0)}L${x(1)} ${y(1)}" stroke="#c6d1bd" stroke-dasharray="4 4" fill="none"/>`;
-  for(const s of series){svg+=`<path d="${s.points.filter(p=>p.every(Number.isFinite)).map((p,i)=>(i?"L":"M")+x(p[0]).toFixed(2)+" "+y(p[1]).toFixed(2)).join(" ")}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;}
+  for(const s of series){
+    const valid=s.points.filter(p=>p.every(Number.isFinite));
+    svg+=`<path d="${valid.map((p,i)=>(i?"L":"M")+x(p[0]).toFixed(2)+" "+y(p[1]).toFixed(2)).join(" ")}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
+    if(valid.length===1)svg+=`<circle cx="${x(valid[0][0]).toFixed(2)}" cy="${y(valid[0][1]).toFixed(2)}" r="3" fill="${s.color}"/>`;
+  }
   svg+=`<text class="plot-label" x="${(W+L-R)/2}" y="${H-1}" text-anchor="middle">${esc(xLabel)}</text></svg>`;
   return svg;
 }
+function lossTaskType(events,view){
+  return events.some(e=>e.loss_metric==="mse")||(!events.some(e=>e.loss_metric==="log_loss")&&runTaskType(view)==="regression")?"regression":"classification";
+}
+function validLiveMetric(value,metric){
+  return Number.isFinite(value)&&value>=0&&(!metric.percentage||value<=1);
+}
+function liveMetricText(value,metric){
+  if(!validLiveMetric(value,metric))return "—";
+  return metric.percentage?(value*100).toFixed(1)+"%":Number(value.toPrecision(4)).toString();
+}
 function renderLoss(events,view=previousView){
   const losses=events.filter(e=>e.event==="loss");
+  const task=lossTaskType(losses,view),continuous=task==="regression";
+  const definitions=[{value:"loss",label:continuous?"MSE":"Loss",axis:continuous?"Mean squared error":"Loss"},
+    ...(continuous?[{value:"rmse",label:"RMSE",axis:"Root mean squared error"},{value:"mae",label:"MAE",axis:"Mean absolute error"}]:
+      [{value:"accuracy",label:"Accuracy",axis:"Accuracy (%)",percentage:true},
+       {value:"balanced_accuracy",label:"Balanced accuracy",axis:"Balanced accuracy (%)",percentage:true},
+       {value:"macro_f1",label:"Macro F1",axis:"Macro F1 (%)",percentage:true}])];
+  const available=definitions.filter(metric=>metric.value==="loss"||losses.some(e=>validLiveMetric(e["train_"+metric.value],metric)||validLiveMetric(e["validation_"+metric.value],metric)));
+  const metric=available.find(item=>item.value===selectedLossMetric[task])||available[0];
+  $("loss-metric").innerHTML=available.map(item=>`<option value="${item.value}">${item.label}</option>`).join("");
+  $("loss-metric").value=metric.value;$("loss-metric").disabled=available.length===1;
+  $("loss-train-value").textContent="—";$("loss-validation-value").textContent="—";
   $("loss-validation-legend").classList.add("hidden");
   if(!losses.length){
     selectedLoss="";$("loss-series").innerHTML='<option value="">Waiting for training</option>';$("loss-series").value="";
@@ -682,12 +708,18 @@ function renderLoss(events,view=previousView){
   const chosen=selectedLoss&&keys.includes(selectedLoss)?selectedLoss:keys.at(-1);
   $("loss-series").value=chosen;
   const data=losses.filter(e=>e.series===chosen);
-  const series=[{color:"#3f7a3a",points:data.map(e=>[e.step,e.train_loss])}];
-  const val=data.filter(e=>Number.isFinite(e.validation_loss));
-  if(val.length)series.push({color:"#6f5fa5",points:val.map(e=>[e.step,e.validation_loss])});
+  const trainKey="train_"+metric.value,validationKey="validation_"+metric.value;
+  const transform=value=>metric.percentage?value*100:value;
+  const train=data.filter(e=>validLiveMetric(e[trainKey],metric));
+  const series=[{color:"#3f7a3a",points:train.map(e=>[e.step,transform(e[trainKey])])}];
+  const val=data.filter(e=>validLiveMetric(e[validationKey],metric));
+  if(val.length)series.push({color:"#6f5fa5",points:val.map(e=>[e.step,transform(e[validationKey])])});
   $("loss-validation-legend").classList.toggle("hidden",!val.length);
-  const continuous=data.some(e=>e.loss_metric==="mse")||(!data.some(e=>e.loss_metric==="log_loss")&&runTaskType(view)==="regression");
-  $("loss-chart").className="";$("loss-chart").innerHTML=plot(series,{yLabel:continuous?"Mean squared error":"Loss"});
+  const latest=data.at(-1);
+  $("loss-train-value").textContent=liveMetricText(latest?.[trainKey],metric);
+  $("loss-validation-value").textContent=liveMetricText(latest?.[validationKey],metric);
+  $("loss-chart").className="";$("loss-chart").innerHTML=plot(series,{yLabel:metric.axis,percentage:metric.percentage});
+  if(!$("loss-chart").innerHTML)$("loss-chart").innerHTML='<p class="small">This metric is unavailable for the selected pass.</p>';
 }
 function predictionScatter(rawPoints){
   const points=(rawPoints||[]).filter(p=>Array.isArray(p)&&p.length===2&&p.every(Number.isFinite));
@@ -833,6 +865,7 @@ $("launch-run").addEventListener("click",async()=>{
   catch(error){notice(error.message,true);}finally{busy=false;$("launch-run").innerHTML='Build &amp; evaluate <span>↗</span>';connectionUI(connected);}
 });
 $("loss-series").addEventListener("change",()=>{selectedLoss=$("loss-series").value;if(previousView)renderLoss(previousView.events);});
+$("loss-metric").addEventListener("change",()=>{if(previousView){selectedLossMetric[lossTaskType(previousView.events,previousView)]=$("loss-metric").value;renderLoss(previousView.events);}});
 $("stop-run").addEventListener("click",async()=>{if(!currentRun)return;try{const result=await api("/api/runs/"+currentRun+"/cancel",{});notice(result.message||"Stop requested.");}catch(error){notice(error.message,true);}});
 
 async function initialize(){
