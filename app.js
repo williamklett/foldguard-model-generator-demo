@@ -5,12 +5,13 @@ const localPage = ["localhost","127.0.0.1"].includes(location.hostname);
 const base = localPage ? location.origin : "http://127.0.0.1:8773";
 let token = sessionStorage.getItem("foldguard-service-token") || "";
 let connected = false, profiles = [], runs = [], checks = {}, stores = [], currentRun = null, activeProfile = null;
-let supportedTaskTypes = ["classification"];
+let supportedTaskTypes = ["classification"], storageAuthMethods = [];
 let polling = false, busy = false, selectedLoss = "", previousView = null;
 const files = {train:null,test:null};
 let summaryTimer, renderedResultRun = null, validationRevision = 0;
 const datasetRevision = {train:0,test:0}, pendingFiles = {train:null,test:null};
-let storageSplit = "train", storageSession = 0, storageRequest = 0, storageNext = null, storageRows = [], storageLoading = false;
+let storageSplit = "train", storageSession = 0, storageRequest = 0, storageNext = null, storageRows = [], storageLoading = false, storageConnecting = false;
+let reconnectingStorageID = null;
 let pairingWindow = null, pairingState = "", pairingTimer = null, importingDatasets = 0;
 const randomID = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), b=>b.toString(16).padStart(2,"0")).join("");
 const validConnectionToken = value => typeof value === "string" && /^[A-Za-z0-9_-]{32,256}$/.test(value);
@@ -141,6 +142,7 @@ function renderStores(){
   const current=$("storage-select").value;
   $("storage-select").innerHTML='<option value="">Choose a connection</option>'+stores.map(p=>`<option value="${esc(p.id)}">${esc(p.name)} · ${esc(p.bucket)}</option>`).join("");
   $("storage-select").value=stores.some(p=>p.id===current)?current:(stores[0]?.id||"");
+  $("storage-browser-controls").classList.toggle("hidden",!stores.length);
 }
 function changeStorageTab(name){
   for(const tab of ["browse","url"]){const active=tab===name;$("storage-"+tab).classList.toggle("hidden",!active);$("storage-"+tab+"-tab").classList.toggle("active",active);$("storage-"+tab+"-tab").setAttribute("aria-selected",String(active));}
@@ -152,12 +154,17 @@ function resetStorageListing(){
 }
 function openStorage(split){
   if(!connected){notice("Connect this computer to browse your storage.",true);showConnection();return;}
+  reconnectingStorageID=null;
   storageSplit=split;storageSession++;resetStorageListing();renderStores();changeStorageTab("browse");
   $("storage-dialog-title").textContent="Choose your "+(split==="train"?"training":"test")+" set.";
-  $("dataset-url").value="";$("storage-prefix").value=stores.find(p=>p.id===$("storage-select").value)?.prefix||"";
-  $("storage-settings").open=!stores.length;storageStatus("Storage credentials stay with your connector.");
+  const selectedStore=stores.find(p=>p.id===$("storage-select").value),needsCredentials=selectedStore?.configured===false;
+  $("dataset-url").value="";$("storage-prefix").value=selectedStore?.prefix||"";
+  clearStorageCredentials();storageCredentialsUI();
+  $("storage-settings").open=!stores.length||needsCredentials;
+  if(needsCredentials)prefillStorageReconnect(selectedStore);
+  storageStatus(needsCredentials?"Enter your server and access keys to connect this storage.":"Storage credentials stay with your connector.");
   $("storage-dialog").showModal();
-  if(stores.length)listStorage(false);
+  if(stores.length&&!needsCredentials)listStorage(false);
 }
 function renderStorageRows(){
   $("storage-objects").innerHTML=storageRows.length?storageRows.map((o,i)=>`<button type="button" class="storage-object" data-storage-object="${i}" ${o.supported?"":"disabled"}><span><strong>${esc(o.key)}</strong><small>${Number.isFinite(o.size)?(o.size/1024).toFixed(1)+" KB":""}${o.last_modified?" · "+esc(o.last_modified):""}</small></span><span>${o.supported?"Select ↗":o.size===0?"Empty file":o.size>24*1024**2?"Exceeds 24 MB":"Unavailable"}</span></button>`).join(""):'<p class="small">No files found in this folder.</p>';
@@ -192,7 +199,67 @@ async function importDataset(body){
   finally{importingDatasets--;connectionUI(connected);if(session===storageSession){$("import-url").disabled=false;renderStorageRows();}}
 }
 function importStorageObject(object){return importDataset({store_id:$("storage-select").value,key:object.key,etag:object.etag,selection_id:object.selection_id});}
-function storageCredentialsUI(){const env=$("store-auth").value==="env";document.querySelectorAll(".store-env").forEach(el=>el.classList.toggle("hidden",!env));document.querySelectorAll(".store-profile").forEach(el=>el.classList.toggle("hidden",env));}
+function clearStorageCredentials(){
+  for(const field of ["access_key_id","secret_access_key","session_token"])$("store-"+field).value="";
+}
+function storageConnectionTab(name){
+  for(const tab of ["connection","options"]){const active=tab===name;$("store-"+tab+"-panel").classList.toggle("hidden",!active);$("store-"+tab+"-tab").classList.toggle("active",active);$("store-"+tab+"-tab").setAttribute("aria-selected",String(active));}
+}
+function storageCredentialsUI(){
+  const method=$("store-auth").value,direct=method==="direct",supported=!connected||storageAuthMethods.includes("direct");
+  document.querySelectorAll(".store-direct,.store-direct-fields").forEach(el=>el.classList.toggle("hidden",!direct));
+  document.querySelectorAll(".store-env").forEach(el=>el.classList.toggle("hidden",method!=="env"));
+  document.querySelectorAll(".store-profile").forEach(el=>el.classList.toggle("hidden",method!=="profile"));
+  $("store-advanced-auth-note").classList.toggle("hidden",direct);$("store-credential-help").classList.toggle("hidden",!direct);
+  $("store-capability-note").textContent=direct&&!supported?"Update your connector to connect with access keys.":"Credentials go only to your local connector.";
+  $("save-storage").disabled=storageConnecting||(direct&&!supported);
+}
+function storageProviderDefaults(){
+  clearStorageCredentials();const r2=$("store-provider").value==="r2";
+  $("store-region").value=r2?"auto":"us-east-1";
+  $("store-server").placeholder=r2?"<accountid>.r2.cloudflarestorage.com":"s3.amazonaws.com";
+  $("store-access_key_env").value=r2?"R2_ACCESS_KEY_ID":"AWS_ACCESS_KEY_ID";
+  $("store-secret_key_env").value=r2?"R2_SECRET_ACCESS_KEY":"AWS_SECRET_ACCESS_KEY";
+}
+function prefillStorageReconnect(store){
+  reconnectingStorageID=store.id;$("store-provider").value=store.provider;storageProviderDefaults();
+  $("store-server").value="";$("store-name").value=store.name;$("store-path").value="/"+store.bucket+"/"+(store.prefix||"");
+  $("store-auth").value="direct";storageConnectionTab("connection");storageCredentialsUI();
+}
+function newStorageConnection(){
+  reconnectingStorageID=null;clearStorageCredentials();$("storage-form").reset();storageProviderDefaults();storageConnectionTab("connection");storageCredentialsUI();
+  $("storage-settings").open=true;$("store-server").focus();
+}
+async function connectStorage(event){
+  event.preventDefault();
+  const method=$("store-auth").value;
+  const body={id:reconnectingStorageID||("store-"+randomID()),name:$("store-name").value.trim(),provider:$("store-provider").value,
+    server:$("store-server").value.trim(),path:$("store-path").value.trim(),region:$("store-region").value.trim()||"auto"};
+  if(method==="direct")Object.assign(body,{access_key_id:$("store-access_key_id").value.trim(),secret_access_key:$("store-secret_access_key").value,session_token:$("store-session_token").value,remember_credentials:$("store-remember").checked});
+  clearStorageCredentials();
+  if(storageConnecting)return;
+  if(method==="direct"&&!storageAuthMethods.includes("direct")){storageStatus("Update your connector to connect with access keys.",true);return;}
+  if(!body.server||!body.path){storageConnectionTab("connection");storageStatus("Enter the server and a path beginning with your bucket name.",true);return;}
+  if(method==="direct"&&(!body.access_key_id||!body.secret_access_key)){storageConnectionTab("connection");storageStatus("Enter an Access Key ID and Secret Access Key.",true);return;}
+  if(method!=="direct"){
+    const parts=body.path.replace(/^\/+/,"").split("/");
+    body.endpoint_url=/^https:\/\//i.test(body.server)?body.server:"https://"+body.server;body.bucket=parts.shift();body.prefix=parts.join("/");
+    body.name=body.name||body.bucket;
+    delete body.server;delete body.path;
+    if(method==="profile")body.aws_profile=$("store-aws_profile").value.trim()||"default";
+    else for(const field of ["access_key_env","secret_key_env","session_token_env"])body[field]=$("store-"+field).value.trim();
+  }
+  const session=storageSession;storageConnecting=true;storageCredentialsUI();storageStatus("Connecting to your storage…");
+  try{
+    const result=await api(method==="direct"?"/api/storage/connect":"/api/storage/profile",body);
+    if(session!==storageSession)return;
+    stores=[...stores.filter(p=>p.id!==result.profile.id),result.profile];renderStores();$("storage-select").value=result.profile.id;$("storage-prefix").value=result.profile.prefix||"";
+    $("storage-settings").open=false;resetStorageListing();
+    if(method==="direct"){storageRows=result.objects||[];storageNext=result.next_token||null;renderStorageRows();storageStatus("Connected. Choose a dataset to import.");}
+    else await listStorage();
+  }catch(error){if(session===storageSession)storageStatus(error.message,true);}
+  finally{clearStorageCredentials();storageConnecting=false;storageCredentialsUI();}
+}
 async function finishConnection(value){
   token=value;
   const data=await api("/api/state",undefined,{timeout:15000});
@@ -346,7 +413,7 @@ function renderMonitor(view){
 }
 async function refreshRun(){if(!currentRun||!connected)return;const view=await api("/api/runs/"+currentRun);renderMonitor(view);}
 function applyWorkspaceState(data){
-  profiles=data.profiles;runs=data.runs;checks=data.checks;stores=data.stores||[];supportedTaskTypes=Array.isArray(data.task_types)?data.task_types:["classification"];connectionUI(true);taskTypeHelp();renderCompute();renderRuns();
+  profiles=data.profiles;runs=data.runs;checks=data.checks;stores=data.stores||[];supportedTaskTypes=Array.isArray(data.task_types)?data.task_types:["classification"];storageAuthMethods=Array.isArray(data.storage_auth_methods)?data.storage_auth_methods:[];connectionUI(true);taskTypeHelp();storageCredentialsUI();renderCompute();renderRuns();
 }
 async function refresh(){
   if(polling||!token)return;polling=true;
@@ -371,23 +438,17 @@ $("pair-service").addEventListener("click",startPairing);
 document.querySelectorAll("[data-storage-split]").forEach(b=>b.addEventListener("click",()=>openStorage(b.dataset.storageSplit)));
 $("storage-browse-tab").addEventListener("click",()=>changeStorageTab("browse"));
 $("storage-url-tab").addEventListener("click",()=>changeStorageTab("url"));
-$("storage-dialog").addEventListener("close",()=>{storageSession++;resetStorageListing();$("import-url").disabled=false;$("dataset-url").value="";});
-$("add-storage").addEventListener("click",()=>{$("storage-settings").open=true;$("store-name").focus();});
-$("storage-select").addEventListener("change",()=>{resetStorageListing();$("storage-prefix").value=stores.find(p=>p.id===$("storage-select").value)?.prefix||"";if($("storage-select").value)listStorage();});
+$("storage-dialog").addEventListener("close",()=>{clearStorageCredentials();reconnectingStorageID=null;storageSession++;resetStorageListing();$("import-url").disabled=false;$("dataset-url").value="";});
+$("add-storage").addEventListener("click",newStorageConnection);
+$("storage-select").addEventListener("change",()=>{resetStorageListing();reconnectingStorageID=null;const selected=stores.find(p=>p.id===$("storage-select").value);$("storage-prefix").value=selected?.prefix||"";if(selected?.configured===false){prefillStorageReconnect(selected);$("storage-settings").open=true;storageStatus("Enter your server and access keys to connect this storage.");}else if(selected)listStorage();});
 $("storage-prefix").addEventListener("input",resetStorageListing);
 $("storage-list-form").addEventListener("submit",e=>{e.preventDefault();listStorage(false);});
 $("storage-more").addEventListener("click",()=>listStorage(true));
-$("store-auth").addEventListener("change",storageCredentialsUI);
-$("store-provider").addEventListener("change",()=>{const r2=$("store-provider").value==="r2";$("store-region").value=r2?"auto":"us-east-1";$("store-access_key_env").value=r2?"R2_ACCESS_KEY_ID":"AWS_ACCESS_KEY_ID";$("store-secret_key_env").value=r2?"R2_SECRET_ACCESS_KEY":"AWS_SECRET_ACCESS_KEY";});
-$("storage-form").addEventListener("submit",async e=>{
-  e.preventDefault();const button=$("save-storage");button.disabled=true;
-  const body={id:"store-"+randomID(),name:$("store-name").value.trim(),provider:$("store-provider").value};
-  for(const field of ["endpoint_url","bucket","prefix","region"])body[field]=$("store-"+field).value.trim();
-  if($("store-auth").value==="profile")body.aws_profile=$("store-aws_profile").value.trim()||"default";
-  else for(const field of ["access_key_env","secret_key_env","session_token_env"])body[field]=$("store-"+field).value.trim();
-  try{const result=await api("/api/storage/profile",body);stores=[...stores.filter(p=>p.id!==result.profile.id),result.profile];renderStores();$("storage-select").value=result.profile.id;$("storage-prefix").value=result.profile.prefix||"";$("storage-settings").open=false;resetStorageListing();await listStorage();}
-  catch(error){storageStatus(error.message,true);}finally{button.disabled=false;}
-});
+$("store-auth").addEventListener("change",()=>{clearStorageCredentials();storageCredentialsUI();});
+$("store-connection-tab").addEventListener("click",()=>storageConnectionTab("connection"));
+$("store-options-tab").addEventListener("click",()=>storageConnectionTab("options"));
+$("store-provider").addEventListener("change",storageProviderDefaults);
+$("storage-form").addEventListener("submit",connectStorage);
 $("storage-url-form").addEventListener("submit",e=>{e.preventDefault();const value=$("dataset-url").value.trim();try{if(new URL(value).protocol!=="https:")throw new Error();importDataset({url:value});}catch(error){storageStatus("Enter a direct HTTPS download link.",true);}});
 $("configure-compute").addEventListener("click",()=>configure(selectedCompute()));
 $("copy-token").addEventListener("click",async()=>{try{await navigator.clipboard.writeText(token);$("copy-token").textContent="Copied ✓";}catch(error){$("service-token").type="text";$("service-token").select();}});
