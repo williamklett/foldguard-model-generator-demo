@@ -569,6 +569,7 @@ function configure(identifier=selectedCompute()){
 function computeSchedulerUI(){document.querySelectorAll(".slurm-field").forEach(e=>e.classList.toggle("hidden",!$("profile-slurm").checked));}
 async function terminalCommandUI(){
   const revision=++terminalCommandRevision,host=$("profile-host").value.trim();
+  $("ssh-terminal-note").textContent="Run this command in your local terminal and complete any password or university sign-in there. Keep the connection available while using your workspace.";
   $("copy-ssh-command").disabled=true;
   if(!/^(?:[a-zA-Z0-9_][a-zA-Z0-9_.-]*@)?[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(host)){$("ssh-terminal-command").textContent="Enter your SSH host above to get the terminal command.";return;}
   $("ssh-terminal-command").textContent="Preparing your terminal command…";
@@ -577,6 +578,7 @@ async function terminalCommandUI(){
     if(revision!==terminalCommandRevision)return;
     if(typeof result.command!=="string"||!result.command.startsWith("ssh "))throw new Error();
     $("ssh-terminal-command").textContent=result.command;$("copy-ssh-command").disabled=false;
+    if(typeof result.note==="string")$("ssh-terminal-note").textContent=result.note;
   }catch(error){if(revision===terminalCommandRevision)$("ssh-terminal-command").textContent="Check the connection fields above to create your terminal command.";}
 }
 function computePreset(){
