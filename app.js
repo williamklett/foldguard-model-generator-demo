@@ -6,6 +6,8 @@ const base = localPage ? location.origin : "http://127.0.0.1:8773";
 let token = sessionStorage.getItem("foldguard-service-token") || "";
 let connected = false, profiles = [], runs = [], checks = {}, stores = [], currentRun = null, activeProfile = null;
 let supportedTaskTypes = ["classification"], storageAuthMethods = [];
+let backgroundDatasetImports = false, maxImportBytes = 24*1024**2, datasetFormats = ["csv","tsv"];
+let annotationDialogState = null, selectedComputeID = "", readyValidationID = "", terminalCommandRevision = 0;
 let polling = false, busy = false, selectedLoss = "", previousView = null;
 const files = {train:null,test:null};
 let summaryTimer, renderedResultRun = null, validationRevision = 0;
@@ -39,7 +41,7 @@ function connectionUI(value) {
   $("side-dot").classList.toggle("online",value);
   $("connection-label").textContent=value?"Workspace connected":"Connect this computer";
   $("side-status").textContent=value?"Companion connected":"Companion offline";
-  $("launch-run").disabled=!value||busy||importingDatasets>0||!!pendingFiles.train||!!pendingFiles.test;
+  $("launch-run").disabled=!value||busy||importingDatasets>0||!!pendingFiles.train||!!pendingFiles.test||files.train?.kind==="fasta"||files.test?.kind==="fasta"||!selectedCompute()||!readyValidationID;
   $("local-token-tools").classList.toggle("hidden",!localPage||!value);
   renderDatasetChoices();
 }
@@ -55,8 +57,7 @@ function changeView(name) {
   if(name==="runs")renderRuns();
 }
 function populateColumns() {
-  const fields = files.train?.columns || files.test?.columns;
-  if(!fields)return;
+  const fields = (files.train?.kind!=="fasta"&&files.train?.columns) || (files.test?.kind!=="fasta"&&files.test?.columns) || [];
   const definitions=[
     ["sequence-column","",/^(sequence|protein_sequence|seq)$/i],
     ["label-column","",/^(label|annotation|class|target|value|origin|location)$/i],
@@ -71,7 +72,7 @@ function populateColumns() {
   scheduleSummary();
 }
 function datasetChanged() {
-  validationRevision++;
+  validationRevision++;readyValidationID="";
   clearTimeout(summaryTimer);
   $("dataset-summary").classList.add("hidden");
   populateColumns();
@@ -80,35 +81,12 @@ function acceptDataset(split, data, choice="") {
   files[split]=data;
   datasetChoices[split]=choice;
   $(split+"-filename").textContent=data.name;
-  $(split+"-detail").textContent=data.rows.toLocaleString()+" rows · "+data.columns.length+" columns";
+  $(split+"-detail").textContent=datasetDetail(data);
   $(split+"-drop").classList.add("filled");
   renderDatasetChoices();
   datasetChanged();
 }
-async function uploadPending(split) {
-  const entry=pendingFiles[split];
-  if(!entry||!connected||entry.uploading)return;
-  entry.uploading=true;connectionUI(connected);
-  try{
-    const text=await entry.file.text();
-    if(pendingFiles[split]!==entry)return;
-    const data=await api("/api/datasets/upload",{text,name:entry.file.name});
-    if(pendingFiles[split]!==entry||datasetRevision[split]!==entry.revision)return;
-    pendingFiles[split]=null;acceptDataset(split,data);
-  }catch(error){if(pendingFiles[split]===entry){$(split+"-detail").textContent="Import failed · choose a file again";notice(error.message,true);pendingFiles[split]=null;}}
-  finally{entry.uploading=false;connectionUI(connected);}
-}
-async function uploadPendingFiles(){await Promise.all(["train","test"].map(uploadPending));}
-async function loadFile(split,file){
-  if(!file)return;
-  if(file.size>24*1024**2){notice("Choose a file smaller than 24 MB.",true);return;}
-  const revision=++datasetRevision[split];
-  datasetChoices[split]="";
-  files[split]=null;pendingFiles[split]={file,revision,uploading:false};datasetChanged();
-  $(split+"-filename").textContent=file.name;
-  $(split+"-detail").textContent=connected?"Importing table…":"Connect this computer to import this file";
-  $(split+"-drop").classList.add("filled");clearNotice();await uploadPending(split);
-}
+async function uploadPendingFiles(){}
 function mapping(){return {sequence:$("sequence-column").value,label:$("label-column").value,id:$("id-column").value,group:$("group-column").value};}
 function taskType(){return $("task-type").value;}
 function supportsTask(){return taskType()!=="regression"||supportedTaskTypes.includes("regression");}
@@ -126,31 +104,52 @@ function taskTypeHelp(){
 }
 function updateTaskType(){
   taskTypeHelp();
-  validationRevision++;clearTimeout(summaryTimer);$("dataset-summary").classList.add("hidden");scheduleSummary();
+  validationRevision++;readyValidationID="";connectionUI(connected);clearTimeout(summaryTimer);$("dataset-summary").classList.add("hidden");scheduleSummary();
 }
-function datasetPayload(){return {train_ref:files.train.id,test_ref:files.test.id,mapping:mapping(),task_type:taskType()};}
-function scheduleSummary(){validationRevision++;clearTimeout(summaryTimer);summaryTimer=setTimeout(validateSummary,300);}
+function datasetPayload(){return {train_ref:files.train.id,test_ref:files.test.id,mapping:mapping(),task_type:taskType(),compute:selectedCompute()};}
+function scheduleSummary(){validationRevision++;readyValidationID="";connectionUI(connected);clearTimeout(summaryTimer);summaryTimer=setTimeout(validateSummary,300);}
 async function validateSummary(){
-  if(!connected||!files.train?.id||!files.test?.id||!mapping().sequence||!mapping().label)return;
+  if(!connected||!selectedCompute()||!backgroundDatasetImports||!files.train?.id||!files.test?.id||files.train.kind==="fasta"||files.test.kind==="fasta"||!mapping().sequence||!mapping().label)return;
   if(!supportsTask()){$("dataset-summary").innerHTML='<div class="warning-text">Update your connector to use continuous values.</div>';$("dataset-summary").classList.remove("hidden");return;}
   const revision=validationRevision;
   try{
-    const data=await api("/api/validate",datasetPayload());
-    if(revision!==validationRevision)return;
+    $("dataset-summary").textContent="Checking the datasets on your compute…";$("dataset-summary").classList.remove("hidden");
+    const queued=await api("/api/validations",datasetPayload());
+    if(!/^[a-f0-9]{32}$/.test(queued.id||""))throw new Error("The connector returned an invalid dataset check reference.");
+    let job=queued;
+    while(connected&&revision===validationRevision&&["queued","running"].includes(job.status)){
+      await new Promise(resolve=>setTimeout(resolve,1500));
+      if(!connected||revision!==validationRevision)return;
+      job=await api("/api/validations/"+queued.id);
+      if(revision!==validationRevision)return;
+      $("dataset-summary").textContent=job.message||"Checking the datasets on your compute…";
+    }
+    if(!connected||revision!==validationRevision)return;
+    if(job.status!=="completed"||!job.summary)throw new Error(job.message||"The dataset check could not be completed.");
+    const data=job.summary;
     const continuous=data.task_type==="regression";
     const extra=continuous?`<span><strong>${esc(numberText(data.target_summary.train.min))}–${esc(numberText(data.target_summary.train.max))}</strong>training value range</span>`:`<span><strong>${data.classes.length}</strong>classes</span>`;
     const target=continuous?`<div class="target-summary">Test value range: ${esc(numberText(data.target_summary.test.min))} to ${esc(numberText(data.target_summary.test.max))}<br>Training mean: ${esc(numberText(data.target_summary.train.mean))} · Standard deviation: ${esc(numberText(data.target_summary.train.std))}</div>`:"";
     $("dataset-summary").innerHTML=`<div class="summary-grid${continuous?" numeric-summary":""}"><span><strong>${data.train_rows.toLocaleString()}</strong>training proteins</span><span><strong>${data.test_rows.toLocaleString()}</strong>test proteins</span>${extra}</div>${target}<div>${data.group_disjoint?"✓ Supplied groups are disjoint":"No family/group holdout supplied"} · Exact train/test duplicates excluded</div><div class="warning-text">${data.homology_screened?"":"Sequence similarity between sets is not screened."}</div>`;
-    $("dataset-summary").classList.remove("hidden");
+    $("dataset-summary").classList.remove("hidden");readyValidationID=queued.id;connectionUI(connected);
   }catch(error){if(revision===validationRevision){$("dataset-summary").innerHTML=`<div class="warning-text">${esc(error.message)}</div>`;$("dataset-summary").classList.remove("hidden");}}
 }
 function storageStatus(message,error=false){$("storage-status").textContent=message;$("storage-status").classList.toggle("error",error);}
+function datasetDetail(data){
+  const destination=data.compute_name?" · On "+data.compute_name:"";
+  if(data.kind==="fasta")return data.rows.toLocaleString()+" sequences · Sequences imported; attach an annotation table to train"+destination;
+  const detail=[data.rows.toLocaleString()+" rows · "+data.columns.length+" columns"];
+  for(const [key,label] of [["matched_rows","matched proteins"],["unmatched_annotation_rows","annotation rows not used"],["unannotated_sequence_rows","sequences without annotations"]])if(Number.isInteger(data[key])&&data[key]>=0)detail.push(data[key].toLocaleString()+" "+label);
+  return detail.join(" · ")+destination;
+}
+function datasetObjectFormat(key){return backgroundDatasetImports?/\.(csv|tsv|fa|faa|fasta)(\.gz)?$/i.test(key):/\.(csv|tsv)$/i.test(key);}
+function annotationTableRows(){return datasetCatalogObjects().filter(row=>/\.(csv|tsv)(\.gz)?$/i.test(row.object.key));}
 function datasetCatalogSignature(store){return JSON.stringify([store.id,store.bucket,store.prefix,store.configured]);}
 function datasetChoiceValue(storeID,object){return JSON.stringify([storeID,object.key,object.selection_id]);}
 function datasetCatalogObjects(){
   return stores.flatMap(store=>{
     const entry=datasetCatalog.get(store.id);
-    return entry?.signature===datasetCatalogSignature(store)?entry.objects.filter(o=>o.supported&&/\.(csv|tsv)$/i.test(o.key)&&o.etag&&o.selection_id).map(object=>({store,object,value:datasetChoiceValue(store.id,object)})):[];
+    return entry?.signature===datasetCatalogSignature(store)?entry.objects.filter(o=>o.supported&&datasetObjectFormat(o.key)&&o.etag&&o.selection_id).map(object=>({store,object,value:datasetChoiceValue(store.id,object)})):[];
   });
 }
 function renderDatasetChoices(){
@@ -167,14 +166,19 @@ function renderDatasetChoices(){
     select.value=choice||(snapshot?"imported-snapshot":"");
     select.disabled=!connected||!available.length||!!datasetImports[split]||!!pendingFiles[split];
     select.setAttribute("aria-busy",String(!!datasetImports[split]));
+    $(split+"-import-cancel").classList.toggle("hidden",!datasetImports[split]?.background);
+    $(split+"-import-cancel").disabled=!!datasetImports[split]?.cancelRequested||!connected;
+    $(split+"-attach-annotations").classList.toggle("hidden",snapshot?.kind!=="fasta");
+    $(split+"-attach-annotations").disabled=!connected||!backgroundDatasetImports||!!datasetImports[split];
   }
+  const formats=backgroundDatasetImports?"CSV/TSV/FASTA":"CSV/TSV",formatWords=backgroundDatasetImports?"CSV, TSV, or FASTA":"CSV or TSV";
   let message;
   if(!connected)message="Connect this computer to choose datasets from your saved storage.";
   else if(!stores.length)message="Connect storage to populate your training and test choices.";
-  else if(loading)message="Reading file choices from your storage…"+(available.length?" "+available.length.toLocaleString()+" CSV/TSV files found.":"");
-  else if(available.length)message=available.length.toLocaleString()+" CSV/TSV file"+(available.length===1?"":"s")+" available. Select a file to check its columns.";
-  else if(hasMore)message="No CSV or TSV datasets in the files loaded so far. Load more files or browse a specific folder.";
-  else message="No CSV or TSV dataset files found in the connected folders. Browse storage to choose another folder.";
+  else if(loading)message="Reading file choices from your storage…"+(available.length?" "+available.length.toLocaleString()+" "+formats+" files found.":"");
+  else if(available.length)message=available.length.toLocaleString()+" "+formats+" file"+(available.length===1?"":"s")+" available. Select a file to import it.";
+  else if(hasMore)message="No "+formatWords+" datasets in the files loaded so far. Load more files or browse a specific folder.";
+  else message="No "+formatWords+" dataset files found in the connected folders. Browse storage to choose another folder.";
   const unconfigured=stores.some(store=>store.configured===false);
   if(connected&&unconfigured&&!available.length)message+=" Some storage connections need credentials; reconnect them in Browse storage.";
   if(connected&&errors.length)message+=" Some connections could not be read. Browse storage to check their connection.";
@@ -184,6 +188,7 @@ function renderDatasetChoices(){
   $("refresh-datasets").disabled=!connected||loading||!stores.some(store=>store.configured);
   $("more-datasets").classList.toggle("hidden",!connected||!hasMore);
   $("more-datasets").disabled=loading;
+  if(annotationDialogState)renderAnnotationControls();
 }
 function seedDatasetCatalog(store,result){
   if(!store?.configured)return;
@@ -245,21 +250,18 @@ function renderStores(){
   $("storage-select").value=stores.some(p=>p.id===current)?current:(stores[0]?.id||"");
   $("storage-browser-controls").classList.toggle("hidden",!stores.length);
 }
-function changeStorageTab(name){
-  for(const tab of ["browse","url"]){const active=tab===name;$("storage-"+tab).classList.toggle("hidden",!active);$("storage-"+tab+"-tab").classList.toggle("active",active);$("storage-"+tab+"-tab").setAttribute("aria-selected",String(active));}
-}
 function resetStorageListing(){
   storageRequest++;storageRows=[];storageNext=null;storageLoading=false;
   $("storage-more").classList.add("hidden");$("storage-list-button").disabled=false;
-  $("storage-objects").innerHTML='<p class="small">Browse a folder to choose a CSV or TSV dataset.</p>';
+  $("storage-objects").innerHTML='<p class="small">Browse a folder to choose a dataset.</p>';
 }
 function openStorage(split){
   if(!connected){notice("Connect this computer to browse your storage.",true);showConnection();return;}
   reconnectingStorageID=null;
-  storageSplit=split;storageSession++;resetStorageListing();renderStores();changeStorageTab("browse");
+  storageSplit=split;storageSession++;resetStorageListing();renderStores();
   $("storage-dialog-title").textContent="Choose your "+(split==="train"?"training":"test")+" set.";
   const selectedStore=stores.find(p=>p.id===$("storage-select").value),needsCredentials=selectedStore?.configured===false;
-  $("dataset-url").value="";$("storage-prefix").value=selectedStore?.prefix||"";
+  $("storage-prefix").value=selectedStore?.prefix||"";
   clearStorageCredentials();storageCredentialsUI();
   $("storage-settings").open=!stores.length||needsCredentials;
   if(needsCredentials)prefillStorageReconnect(selectedStore);
@@ -268,7 +270,7 @@ function openStorage(split){
   if(stores.length&&!needsCredentials)listStorage(false);
 }
 function renderStorageRows(){
-  $("storage-objects").innerHTML=storageRows.length?storageRows.map((o,i)=>`<button type="button" class="storage-object" data-storage-object="${i}" ${o.supported?"":"disabled"}><span><strong>${esc(o.key)}</strong><small>${Number.isFinite(o.size)?(o.size/1024).toFixed(1)+" KB":""}${o.last_modified?" · "+esc(o.last_modified):""}</small></span><span>${o.supported?"Select ↗":o.size===0?"Empty file":o.size>24*1024**2?"Exceeds 24 MB":"Unavailable"}</span></button>`).join(""):'<p class="small">No files found in this folder.</p>';
+  $("storage-objects").innerHTML=storageRows.length?storageRows.map((o,i)=>`<button type="button" class="storage-object" data-storage-object="${i}" ${o.supported?"":"disabled"}><span><strong>${esc(o.key)}</strong><small>${Number.isFinite(o.size)?formatImportBytes(o.size):""}${o.last_modified?" · "+esc(o.last_modified):""}</small></span><span>${o.supported?"Select ↗":o.size===0?"Empty file":o.size>maxImportBytes?"Exceeds "+formatImportBytes(maxImportBytes):"Unavailable"}</span></button>`).join(""):'<p class="small">No files found in this folder.</p>';
   document.querySelectorAll("[data-storage-object]").forEach(b=>b.addEventListener("click",()=>importStorageObject(storageRows[Number(b.dataset.storageObject)])));
   $("storage-more").classList.toggle("hidden",!storageNext);
 }
@@ -283,38 +285,169 @@ async function listStorage(more=false){
     const result=await api("/api/storage/objects",{store_id:storeID,prefix,...(more&&storageNext?{continuation_token:storageNext}:{})});
     if(request!==storageRequest||session!==storageSession)return;
     storageRows=more?[...storageRows,...result.objects]:result.objects;storageNext=result.next_token;renderStorageRows();
-    storageStatus("Choose a dataset to import. Files are read directly by your connector.");
+    storageStatus("Choose a dataset to import directly to your SSH compute.");
   }catch(error){if(request===storageRequest&&session===storageSession)storageStatus(error.message,true);}
   finally{if(request===storageRequest){storageLoading=false;$("storage-list-button").disabled=false;$("storage-more").disabled=false;}}
 }
 async function importDataset(body,options={}){
-  const split=options.split||storageSplit,dialog=options.source!=="dropdown";
+  const split=options.split||storageSplit,dialog=options.source!=="dropdown",background=true;
+  if(!backgroundDatasetImports){notice("Update your connector to import directly to SSH compute.",true);return;}
+  if(!selectedCompute()){notice("Configure your SSH compute before importing datasets.",true);configure();return;}
   if(datasetImports[split])return;
-  const session=storageSession,epoch=datasetConnectionEpoch,revision=++datasetRevision[split],operation={revision,choice:options.choice||""};
+  const session=storageSession,epoch=datasetConnectionEpoch,revision=++datasetRevision[split];
+  const operation={split,revision,epoch,choice:options.choice||"",background,jobID:null,cancelRequested:false};
+  if(background&&dialog)operation.onQueued=()=>{if(session===storageSession){$("storage-dialog").close();}};
   datasetImports[split]=operation;
   pendingFiles[split]=null;importingDatasets++;connectionUI(connected);
-  if(dialog){storageStatus("Importing and checking your dataset…");document.querySelectorAll(".storage-object").forEach(b=>b.disabled=true);$("import-url").disabled=true;}
-  else $(split+"-detail").textContent="Importing and checking your dataset…";
+  if(dialog){storageStatus("Importing and checking your dataset…");document.querySelectorAll(".storage-object").forEach(b=>b.disabled=true);}
+  $(split+"-detail").textContent=background?"Import queued…":"Importing and checking your dataset…";
   try{
-    const data=await api("/api/datasets/import",body);
-    if(!connected||epoch!==datasetConnectionEpoch||(dialog&&session!==storageSession)||revision!==datasetRevision[split])return;
-    acceptDataset(split,data,options.choice||"");if(dialog){$("dataset-url").value="";$("storage-dialog").close();}clearNotice();
+    const data=await runDatasetJob(body,operation);
+    if(!data||!importOperationCurrent(operation)||(!background&&dialog&&session!==storageSession))return;
+    acceptDataset(split,data,options.choice||"");
+    if(dialog&&session===storageSession){$("storage-dialog").close();}clearNotice();
   }catch(error){
-    if(connected&&epoch===datasetConnectionEpoch&&revision===datasetRevision[split]){
-      if(dialog&&session===storageSession)storageStatus(error.message,true);
-      else if(!dialog){
-        const message=typeof error?.message==="string"&&error.message.trim()?error.message:"The dataset could not be imported.";
-        $(split+"-detail").textContent="Import failed · "+message;notice(message,true);
-      }
+    if(importOperationCurrent(operation)){
+      const message=error.cancelled?"Import cancelled.":importErrorMessage(error);
+      $(split+"-detail").textContent=(error.cancelled?"":"Import failed · ")+message;
+      if(dialog&&session===storageSession)storageStatus(message,!error.cancelled);
+      else if(!error.cancelled)notice(message,true);
     }
   }
   finally{
-    datasetImports[split]=null;importingDatasets--;connectionUI(connected);
-    if(!dialog&&epoch!==datasetConnectionEpoch&&revision===datasetRevision[split])$(split+"-detail").textContent=files[split]?files[split].rows.toLocaleString()+" rows · "+files[split].columns.length+" columns":"Choose a dataset after reconnecting";
-    if(dialog&&session===storageSession){$("import-url").disabled=false;renderStorageRows();}
+    if(datasetImports[split]===operation)datasetImports[split]=null;
+    importingDatasets--;connectionUI(connected);
+    if(epoch!==datasetConnectionEpoch&&revision===datasetRevision[split])$(split+"-detail").textContent=files[split]?datasetDetail(files[split]):"Choose a dataset after reconnecting";
+    if(dialog&&session===storageSession){renderStorageRows();}
   }
 }
+function importErrorMessage(error){return typeof error?.message==="string"&&error.message.trim()?error.message:"The dataset could not be imported.";}
+function formatImportBytes(bytes){
+  if(!Number.isFinite(bytes)||bytes<0)return "0 B";
+  const unit=bytes>=1024**3?"GiB":bytes>=1024**2?"MiB":bytes>=1024?"KiB":"B",divisor={GiB:1024**3,MiB:1024**2,KiB:1024,B:1}[unit];
+  return (bytes/divisor).toLocaleString(undefined,{maximumFractionDigits:1})+" "+unit;
+}
+function importOperationCurrent(operation){return connected&&operation.epoch===datasetConnectionEpoch&&operation.revision===datasetRevision[operation.split]&&datasetImports[operation.split]===operation;}
+function importProgress(operation,job){
+  if(!importOperationCurrent(operation))return;
+  const read=Number(job.bytes_read)||0,total=Number(job.total_bytes)||0,rows=Number(job.rows)||0;
+  const progress=[job.message||job.stage||job.status];
+  if(job.compute_name||job.destination)progress.push(job.compute_name||job.destination);
+  if(total||read)progress.push(formatImportBytes(read)+(total?" / "+formatImportBytes(total):""));
+  if(Number.isFinite(job.rows))progress.push(rows.toLocaleString()+" rows");
+  const text=progress.join(" · ");
+  $(operation.split+"-detail").textContent=text;
+  if(operation.annotation&&annotationDialogState===operation.annotation)$("annotations-status").textContent=text;
+}
+async function runDatasetJob(body,operation){
+  const compute=body.compute||selectedCompute();
+  if(!compute)throw new Error("Configure your SSH compute before importing datasets.");
+  const queued=await api("/api/imports",{...body,compute});
+  if(!/^[a-f0-9]{32}$/.test(queued.id||""))throw new Error("The connector returned an invalid import reference.");
+  operation.jobID=queued.id;
+  if(!importOperationCurrent(operation))return null;
+  importProgress(operation,queued);
+  if(operation.onQueued)operation.onQueued();
+  if(operation.cancelRequested)await api("/api/imports/"+operation.jobID+"/cancel",{});
+  while(importOperationCurrent(operation)){
+    await new Promise(resolve=>setTimeout(resolve,1000));
+    if(!importOperationCurrent(operation))return null;
+    const job=await api("/api/imports/"+operation.jobID);
+    if(!importOperationCurrent(operation))return null;
+    importProgress(operation,job);
+    if(job.status==="completed"){
+      if(!job.dataset?.id)throw new Error("The completed import did not contain a dataset.");
+      return job.dataset;
+    }
+    if(job.status==="failed"||job.status==="cancelled"){
+      const error=new Error(job.message||(job.status==="cancelled"?"Import cancelled.":"The dataset could not be imported."));
+      error.cancelled=job.status==="cancelled";throw error;
+    }
+    if(!["queued","running"].includes(job.status))throw new Error("The connector returned an invalid import status.");
+  }
+  return null;
+}
+async function cancelDatasetImport(split){
+  const operation=datasetImports[split];
+  if(!operation?.background||operation.cancelRequested||!connected)return;
+  operation.cancelRequested=true;renderDatasetChoices();renderAnnotationControls();
+  if(!operation.jobID)return;
+  try{await api("/api/imports/"+operation.jobID+"/cancel",{});}
+  catch(error){if(importOperationCurrent(operation)){operation.cancelRequested=false;renderDatasetChoices();renderAnnotationControls();notice(importErrorMessage(error),true);}}
+}
 function importStorageObject(object){return importDataset({store_id:$("storage-select").value,key:object.key,etag:object.etag,selection_id:object.selection_id});}
+function openAnnotations(split){
+  const sequence=files[split];
+  if(!connected||!backgroundDatasetImports||sequence?.kind!=="fasta"||datasetImports[split])return;
+  annotationDialogState={split,sequence,epoch:datasetConnectionEpoch,revision:datasetRevision[split],annotations:null,choice:""};
+  const rows=annotationTableRows();
+  $("annotations-dataset-select").innerHTML='<option value="">Choose an annotation table</option>'+rows.map(row=>`<option value="${esc(row.value)}">${esc(row.store.name)} · ${esc(row.object.key)}</option>`).join("");
+  $("annotations-dataset-select").value="";
+  $("annotations-allow-extra").checked=false;
+  $("annotations-id-column").innerHTML='<option value="">Import a table first</option>';
+  $("annotations-status").textContent=rows.length?"Choose a CSV or TSV table with protein IDs and the annotation to predict.":"No annotation tables found. Refresh your dataset choices or browse a folder containing a CSV or TSV table.";
+  $("annotations-dialog-title").textContent="Annotate your "+(split==="train"?"training":"test")+" sequences";
+  renderAnnotationControls();$("annotations-dialog").showModal();
+}
+function annotationContextCurrent(context){return !!context&&connected&&context.epoch===datasetConnectionEpoch&&files[context.split]===context.sequence&&datasetRevision[context.split]===context.revision;}
+function renderAnnotationControls(){
+  const context=annotationDialogState,active=context&&datasetImports[context.split],valid=annotationContextCurrent(context);
+  $("annotations-dataset-select").disabled=!valid||!!active;
+  $("annotations-import").disabled=!valid||!!active||!$("annotations-dataset-select").value;
+  $("annotations-id-column").disabled=!valid||!!active||!context?.annotations;
+  $("annotations-allow-extra").disabled=!valid||!!active;
+  $("annotations-join").disabled=!valid||!!active||!context?.annotations||!$("annotations-id-column").value;
+  $("annotations-cancel").classList.toggle("hidden",!active?.annotation);
+  $("annotations-cancel").disabled=!connected||!!active?.cancelRequested;
+}
+async function importAnnotations(){
+  const context=annotationDialogState;
+  if(!annotationContextCurrent(context)||datasetImports[context.split])return;
+  const row=annotationTableRows().find(candidate=>candidate.value===$("annotations-dataset-select").value);
+  if(!row)return;
+  context.annotations=null;context.choice=row.value;
+  $("annotations-id-column").innerHTML='<option value="">Importing table…</option>';
+  await annotationJob(context,{store_id:row.store.id,key:row.object.key,etag:row.object.etag,selection_id:row.object.selection_id},false);
+}
+async function joinAnnotations(){
+  const context=annotationDialogState,column=$("annotations-id-column").value;
+  if(!annotationContextCurrent(context)||datasetImports[context.split]||!context.annotations?.columns.includes(column))return;
+  await annotationJob(context,{kind:"join",sequence_ref:context.sequence.id,annotations_ref:context.annotations.id,annotation_id_column:column,allow_unmatched_annotations:$("annotations-allow-extra").checked===true},true);
+}
+async function annotationJob(context,body,join){
+  body={...body,compute:context.sequence.compute_id||selectedCompute()};
+  const split=context.split,operation={split,revision:context.revision,epoch:context.epoch,choice:datasetChoices[split],background:true,jobID:null,cancelRequested:false,annotation:context};
+  datasetImports[split]=operation;importingDatasets++;connectionUI(connected);renderAnnotationControls();
+  try{
+    const dataset=await runDatasetJob(body,operation);
+    if(!dataset||!importOperationCurrent(operation)||!annotationContextCurrent(context))return;
+    if(join){
+      if(dataset.kind==="fasta")throw new Error("The annotation join did not produce a labeled table.");
+      acceptDataset(split,dataset);context.revision=datasetRevision[split];
+      if(annotationDialogState===context)$("annotations-dialog").close();
+    }else{
+      if(dataset.kind==="fasta")throw new Error("Choose a CSV or TSV annotation table.");
+      context.annotations=dataset;
+      if(annotationDialogState===context){
+        $("annotations-id-column").innerHTML='<option value="">Choose the protein ID column</option>'+dataset.columns.map(column=>`<option value="${esc(column)}">${esc(column)}</option>`).join("");
+        $("annotations-id-column").value=dataset.columns.find(column=>/^(id|protein_id|accession)$/i.test(column))||"";
+        $("annotations-status").textContent=dataset.rows.toLocaleString()+" annotation rows imported. Choose the ID column that matches your FASTA identifiers, then attach annotations.";
+      }
+      $(split+"-detail").textContent=datasetDetail(context.sequence);
+    }
+  }catch(error){
+    if(importOperationCurrent(operation)){
+      const message=error.cancelled?"Import cancelled.":importErrorMessage(error);
+      $(split+"-detail").textContent=datasetDetail(context.sequence);
+      if(annotationDialogState===context)$("annotations-status").textContent=message;
+      if(!error.cancelled)notice(message,true);
+    }
+  }
+  finally{
+    if(datasetImports[split]===operation)datasetImports[split]=null;
+    importingDatasets--;connectionUI(connected);renderAnnotationControls();
+  }
+}
 function clearStorageCredentials(){
   for(const field of ["access_key_id","secret_access_key","session_token"])$("store-"+field).value="";
 }
@@ -407,33 +540,58 @@ function receivePairingFragment(){
   if(window.opener){try{window.opener.postMessage({type:"foldguard:paired",state,token:value},location.origin);setTimeout(()=>window.close(),200);}catch(error){/* This tab can connect independently. */}}
   return true;
 }
-function selectedCompute(){return document.querySelector('input[name="compute"]:checked').value;}
-function renderCompute(){
-  document.querySelectorAll("[data-compute-status]").forEach(el=>{
-    const p=profiles.find(p=>p.id===el.dataset.computeStatus),check=checks[el.dataset.computeStatus];
-    el.textContent=check?.ok?"● Connection checked":p?.assets_configured?"Not checked":"Configure assets";
-    el.classList.toggle("ready",!!check?.ok);
-  });
+function selectedCompute(){return selectedComputeID;}
+function preferredCompute(data){
+  const remote=profiles.filter(p=>p.kind!=="local");
+  return remote.find(p=>p.id===data.active_compute_id)?.id||remote.find(p=>p.id===selectedComputeID)?.id||remote.find(p=>p.id==="adroit"&&p.workspace_configured)?.id||remote.find(p=>p.id==="ssh-gpu")?.id||remote[0]?.id||"";
 }
-function configure(identifier){
+function renderCompute(){
+  const p=profiles.find(p=>p.id===selectedCompute()),check=checks[selectedCompute()];
+  $("compute-name").textContent=p?.name||"Your SSH compute";
+  $("compute-destination").textContent=p?.host?(p.host+(p.kind==="slurm"?" · Slurm":" · SSH")):"Connect in your terminal, then configure this workspace.";
+  $("compute-status").textContent=check?.ok?"● Connection checked":p?.workspace_configured?"Connection not checked":"Setup required";
+  $("compute-status").classList.toggle("ready",!!check?.ok);
+}
+function configure(identifier=selectedCompute()){
   if(!connected){notice("Connect the companion service to configure compute.",true);showConnection();return;}
-  activeProfile=profiles.find(p=>p.id===identifier);
-  if(!activeProfile)return;
-  $("compute-dialog-title").textContent="Configure "+activeProfile.name;
+  activeProfile=profiles.find(p=>p.id===identifier&&p.kind!=="local")||profiles.find(p=>p.id==="ssh-gpu")||{id:"ssh-gpu",name:"My compute",kind:"ssh",device:"cuda",cpus:4,minutes:60,memory_gb:24};
+  $("compute-dialog-title").textContent="Connect your compute";
   for(const field of ["id","name","host","python","work_dir","model_dir","device","cpus","partition","minutes","memory_gb","ssh_socket"]){$("profile-"+field).value=activeProfile[field]??"";}
   for(const key of ["python","model_dir"]){$("profile-"+key).required=!activeProfile.assets_configured;$("profile-"+key).placeholder=activeProfile.assets_configured?"Configured by operator; leave blank to keep":"Enter the operator-provided path";}
-  $("profile-work_dir").required=!activeProfile.workspace_configured;$("profile-work_dir").placeholder=activeProfile.workspace_configured?"Configured by operator; leave blank to keep":"Enter a dedicated working directory";
-  $("host-label").classList.toggle("hidden",activeProfile.kind==="local");
-  document.querySelectorAll(".remote-field").forEach(e=>e.classList.toggle("hidden",activeProfile.kind==="local"));
-  document.querySelectorAll(".slurm-field").forEach(e=>e.classList.toggle("hidden",activeProfile.kind!=="slurm"));
-  $("profile-check").textContent="Your SSH agent or existing session handles authentication. No passwords are stored here.";
+  $("profile-work_dir").required=!activeProfile.workspace_configured;$("profile-work_dir").placeholder=activeProfile.workspace_configured?"Configured by operator; leave blank to keep":"/absolute/path/to/foldguard-workspace";
+  $("profile-slurm").checked=activeProfile.kind==="slurm";
+  $("profile-preset").value=activeProfile.host?.endsWith("adroit.princeton.edu")?"adroit":"custom";
+  computeSchedulerUI();terminalCommandUI();
+  $("profile-check").textContent="Sign in from your local terminal. Your SSH session handles authentication; datasets go directly from storage to this compute.";
   $("profile-check").className="profile-check";
   $("compute-dialog").showModal();
+}
+function computeSchedulerUI(){document.querySelectorAll(".slurm-field").forEach(e=>e.classList.toggle("hidden",!$("profile-slurm").checked));}
+async function terminalCommandUI(){
+  const revision=++terminalCommandRevision,host=$("profile-host").value.trim();
+  $("copy-ssh-command").disabled=true;
+  if(!/^(?:[a-zA-Z0-9_][a-zA-Z0-9_.-]*@)?[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(host)){$("ssh-terminal-command").textContent="Enter your SSH host above to get the terminal command.";return;}
+  $("ssh-terminal-command").textContent="Preparing your terminal command…";
+  try{
+    const result=await api("/api/compute/terminal-command",profileForm());
+    if(revision!==terminalCommandRevision)return;
+    if(typeof result.command!=="string"||!result.command.startsWith("ssh "))throw new Error();
+    $("ssh-terminal-command").textContent=result.command;$("copy-ssh-command").disabled=false;
+  }catch(error){if(revision===terminalCommandRevision)$("ssh-terminal-command").textContent="Check the connection fields above to create your terminal command.";}
+}
+function computePreset(){
+  const adroit=$("profile-preset").value==="adroit";
+  const preset=adroit?profiles.find(p=>p.id==="adroit"):profiles.find(p=>p.id==="ssh-gpu");
+  if(preset){activeProfile=preset;for(const field of ["id","name","host","python","work_dir","model_dir","device","cpus","partition","minutes","memory_gb","ssh_socket"]){$("profile-"+field).value=preset[field]??"";}}
+  else{$("profile-name").value=adroit?"Adroit":"My compute";$("profile-host").value=adroit?"adroit.princeton.edu":"";}
+  for(const key of ["python","model_dir"]){$("profile-"+key).required=!activeProfile.assets_configured;$("profile-"+key).placeholder=activeProfile.assets_configured?"Configured by operator; leave blank to keep":"Enter the operator-provided path";}
+  $("profile-work_dir").required=!activeProfile.workspace_configured;
+  $("profile-slurm").checked=adroit;computeSchedulerUI();terminalCommandUI();
 }
 function profileForm(){
   const result={...activeProfile};
   for(const field of ["name","host","python","work_dir","model_dir","device","cpus","partition","minutes","memory_gb","ssh_socket"]){result[field]=$("profile-"+field).value.trim();}
-  result.gpus=result.device==="cuda"?1:0;
+  result.kind=$("profile-slurm").checked?"slurm":"ssh";result.gpus=result.device==="cuda"?1:0;
   return result;
 }
 function renderRuns(){
@@ -530,7 +688,9 @@ function renderMonitor(view){
 }
 async function refreshRun(){if(!currentRun||!connected)return;const view=await api("/api/runs/"+currentRun);renderMonitor(view);}
 function applyWorkspaceState(data){
-  profiles=data.profiles;runs=data.runs;checks=data.checks;stores=data.stores||[];supportedTaskTypes=Array.isArray(data.task_types)?data.task_types:["classification"];storageAuthMethods=Array.isArray(data.storage_auth_methods)?data.storage_auth_methods:[];connectionUI(true);taskTypeHelp();storageCredentialsUI();renderCompute();renderRuns();
+  backgroundDatasetImports=data.remote_dataset_imports===true;maxImportBytes=backgroundDatasetImports?(Number(data.max_import_bytes)||16*1024**3):24*1024**2;datasetFormats=Array.isArray(data.dataset_formats)?data.dataset_formats:["csv","tsv"];
+  $("remote-import-limits").textContent=backgroundDatasetImports?"Storage imports: CSV, TSV, or FASTA, including gzip, up to "+formatImportBytes(maxImportBytes)+" per file. Files go directly from storage to your SSH compute.":"Update your connector to import directly to your SSH compute. Files remain in storage until you import them.";
+  profiles=data.profiles;const nextCompute=preferredCompute(data);if(selectedComputeID&&nextCompute!==selectedComputeID){files.train=null;files.test=null;readyValidationID="";validationRevision++;}selectedComputeID=nextCompute;runs=data.runs;checks=data.checks;stores=data.stores||[];supportedTaskTypes=Array.isArray(data.task_types)?data.task_types:["classification"];storageAuthMethods=Array.isArray(data.storage_auth_methods)?data.storage_auth_methods:[];connectionUI(true);taskTypeHelp();storageCredentialsUI();renderCompute();renderRuns();
   syncDatasetCatalog();
 }
 async function refresh(){
@@ -543,23 +703,25 @@ async function refresh(){
 document.querySelectorAll("[data-view]").forEach(b=>b.addEventListener("click",()=>changeView(b.dataset.view)));
 for(const split of ["train","test"]){
   $(split+"-dataset-select").addEventListener("change",()=>chooseDataset(split));
-  $(split+"-file").addEventListener("change",e=>loadFile(split,e.target.files[0]));
-  const drop=$(split+"-drop");
-  for(const event of ["dragenter","dragover"])drop.addEventListener(event,e=>{e.preventDefault();drop.classList.add("dragover");});
-  for(const event of ["dragleave","drop"])drop.addEventListener(event,e=>{e.preventDefault();drop.classList.remove("dragover");});
-  drop.addEventListener("drop",e=>loadFile(split,e.dataTransfer.files[0]));
 }
+for(const split of ["train","test"]){
+  $(split+"-import-cancel").addEventListener("click",()=>cancelDatasetImport(split));
+  $(split+"-attach-annotations").addEventListener("click",()=>openAnnotations(split));
+}
+$("annotations-dataset-select").addEventListener("change",()=>{if(annotationDialogState){annotationDialogState.annotations=null;$("annotations-id-column").innerHTML='<option value="">Import a table first</option>';}renderAnnotationControls();});
+$("annotations-id-column").addEventListener("change",renderAnnotationControls);
+$("annotations-import").addEventListener("click",importAnnotations);
+$("annotations-join").addEventListener("click",joinAnnotations);
+$("annotations-cancel").addEventListener("click",()=>{if(annotationDialogState)cancelDatasetImport(annotationDialogState.split);});
+$("annotations-dialog").addEventListener("close",()=>{annotationDialogState=null;});
 $("refresh-datasets").addEventListener("click",()=>syncDatasetCatalog(true));
 $("more-datasets").addEventListener("click",()=>syncDatasetCatalog(false,true));
 for(const id of ["sequence-column","label-column","id-column","group-column"])$(id).addEventListener("change",scheduleSummary);
 $("task-type").addEventListener("change",updateTaskType);
-document.querySelectorAll('input[name="compute"]').forEach(input=>input.addEventListener("change",()=>{document.querySelectorAll(".compute-card").forEach(c=>c.classList.toggle("selected",c.querySelector("input").checked));}));
 for(const id of ["connection-button","open-connection"])$(id).addEventListener("click",showConnection);
 $("pair-service").addEventListener("click",startPairing);
 document.querySelectorAll("[data-storage-split]").forEach(b=>b.addEventListener("click",()=>openStorage(b.dataset.storageSplit)));
-$("storage-browse-tab").addEventListener("click",()=>changeStorageTab("browse"));
-$("storage-url-tab").addEventListener("click",()=>changeStorageTab("url"));
-$("storage-dialog").addEventListener("close",()=>{clearStorageCredentials();reconnectingStorageID=null;storageSession++;resetStorageListing();$("import-url").disabled=false;$("dataset-url").value="";});
+$("storage-dialog").addEventListener("close",()=>{clearStorageCredentials();reconnectingStorageID=null;storageSession++;resetStorageListing();});
 $("add-storage").addEventListener("click",newStorageConnection);
 $("storage-select").addEventListener("change",()=>{resetStorageListing();reconnectingStorageID=null;const selected=stores.find(p=>p.id===$("storage-select").value);$("storage-prefix").value=selected?.prefix||"";if(selected?.configured===false){prefillStorageReconnect(selected);$("storage-settings").open=true;storageStatus("Enter your server and access keys to connect this storage.");}else if(selected)listStorage();});
 $("storage-prefix").addEventListener("input",resetStorageListing);
@@ -570,8 +732,12 @@ $("store-connection-tab").addEventListener("click",()=>storageConnectionTab("con
 $("store-options-tab").addEventListener("click",()=>storageConnectionTab("options"));
 $("store-provider").addEventListener("change",storageProviderDefaults);
 $("storage-form").addEventListener("submit",connectStorage);
-$("storage-url-form").addEventListener("submit",e=>{e.preventDefault();const value=$("dataset-url").value.trim();try{if(new URL(value).protocol!=="https:")throw new Error();importDataset({url:value});}catch(error){storageStatus("Enter a direct HTTPS download link.",true);}});
-$("configure-compute").addEventListener("click",()=>configure(selectedCompute()));
+
+$("configure-compute").addEventListener("click",()=>configure());
+$("profile-slurm").addEventListener("change",computeSchedulerUI);
+$("profile-preset").addEventListener("change",computePreset);
+for(const id of ["profile-host","profile-ssh_socket"])$(id).addEventListener("input",terminalCommandUI);
+$("copy-ssh-command").addEventListener("click",async()=>{try{await navigator.clipboard.writeText($("ssh-terminal-command").textContent);$("profile-check").textContent="Command copied. Run it in your local terminal, complete sign-in, then test the connection here.";}catch(error){$("profile-check").textContent="Select the command above and copy it into your local terminal.";}});
 $("copy-token").addEventListener("click",async()=>{try{await navigator.clipboard.writeText(token);$("copy-token").textContent="Copied ✓";}catch(error){$("service-token").type="text";$("service-token").select();}});
 $("connect-service").addEventListener("click",async()=>{
   const button=$("connect-service");button.disabled=true;
@@ -586,13 +752,20 @@ $("test-compute").addEventListener("click",async()=>{
   finally{button.disabled=false;}
 });
 $("compute-form").addEventListener("submit",async e=>{
-  e.preventDefault();try{await api("/api/profile",profileForm());$("compute-dialog").close();await refresh();notice("Compute profile saved. Test its connection before launching.");}catch(error){$("profile-check").textContent=error.message;$("profile-check").classList.add("error");}
+  e.preventDefault();
+  try{
+    const saved=await api("/api/profile",profileForm());
+    for(const split of ["train","test"]){files[split]=null;datasetChoices[split]="";datasetRevision[split]++;$(split+"-filename").textContent="Choose from storage";$(split+"-detail").textContent="Import a dataset to your SSH compute";$(split+"-drop").classList.remove("filled");}
+    selectedComputeID=saved.id;readyValidationID="";validationRevision++;$("compute-dialog").close();datasetChanged();await refresh();
+    notice("SSH compute saved. Test its connection, then import your datasets directly to it.");
+  }catch(error){$("profile-check").textContent=error.message;$("profile-check").classList.add("error");}
 });
 $("launch-run").addEventListener("click",async()=>{
-  if(!connected){showConnection();return;}if(!supportsTask()){notice("Update your connector to use continuous values.",true);return;}if(importingDatasets||pendingFiles.train||pendingFiles.test){notice("Wait for dataset imports to finish.",true);return;}if(!files.train?.id||!files.test?.id){notice("Choose a training set and a test set first.",true);return;}
+  if(!connected){showConnection();return;}if(!supportsTask()){notice("Update your connector to use continuous values.",true);return;}if(importingDatasets||pendingFiles.train||pendingFiles.test){notice("Wait for dataset imports to finish.",true);return;}if(!files.train?.id||!files.test?.id){notice("Choose a training set and a test set first.",true);return;}if(files.train.kind==="fasta"||files.test.kind==="fasta"){notice("Attach an annotation table to each FASTA dataset before training.",true);return;}
+  if(!selectedCompute()||!readyValidationID){notice("Wait for the dataset checks on your compute to complete.",true);return;}
   busy=true;connectionUI(true);$("launch-run").textContent="Checking & launching…";clearNotice();
   try{const response=await api("/api/runs",{...datasetPayload(),
-    annotation:mapping().label,name:$("run-name").value.trim()||(mapping().label+" · v1"),compute:selectedCompute()});
+    annotation:mapping().label,name:$("run-name").value.trim()||(mapping().label+" · v1"),compute:selectedCompute(),validation_id:readyValidationID});
     currentRun=response.id;previousView=null;selectedLoss="";await refresh();notice("Run launched. You can follow its progress here or return to it from Model runs.");}
   catch(error){notice(error.message,true);}finally{busy=false;$("launch-run").innerHTML='Build &amp; evaluate <span>↗</span>';connectionUI(connected);}
 });
