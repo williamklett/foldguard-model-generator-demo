@@ -57,17 +57,20 @@ function changeView(name) {
   if(name==="runs")renderRuns();
 }
 function populateColumns() {
-  const fields = (files.train?.kind!=="fasta"&&files.train?.columns) || (files.test?.kind!=="fasta"&&files.test?.columns) || [];
+  let fields = (files.train?.kind!=="fasta"&&files.train?.columns) || (files.test?.kind!=="fasta"&&files.test?.columns) || [];
+  if(files.train?.kind!=="fasta"&&files.test?.kind!=="fasta"&&files.train?.columns&&files.test?.columns)fields=fields.filter(f=>files.test.columns.includes(f));
   const definitions=[
     ["sequence-column","",/^(sequence|protein_sequence|seq)$/i],
-    ["label-column","",/^(label|annotation|class|target|value|origin|location)$/i],
+    ["label-column","",/^(label|annotation|class|target|value|origin|location|role|function_class)$/i],
     ["id-column","Generate IDs",/^(id|protein_id|accession)$/i],
-    ["group-column","No group column",/^(family|family_taxid|group|component_id|cluster)$/i]];
+    ["group-column","No group column",/^(family|family_taxid|group|component_id|cluster|cluster_id)$/i]];
   for(const [id,empty,pattern] of definitions){
     const select=$(id),current=select.value;
     select.innerHTML=(empty?`<option value="">${empty}</option>`:`<option value="">Choose a column</option>`)+fields.map(f=>`<option value="${esc(f)}">${esc(f)}</option>`).join("");
     select.value=fields.includes(current)?current:(fields.find(f=>pattern.test(f))||"");
   }
+  const group=files.train?.curation?.group_column||files.test?.curation?.group_column;
+  if(group&&fields.includes(group))$("group-column").value=group;
   if(!$("run-name").value&&$("label-column").value)$("run-name").placeholder=$("label-column").value+" · v1";
   scheduleSummary();
 }
@@ -111,6 +114,7 @@ function scheduleSummary(){validationRevision++;readyValidationID="";connectionU
 async function validateSummary(){
   if(!connected||!selectedCompute()||!backgroundDatasetImports||!files.train?.id||!files.test?.id||files.train.kind==="fasta"||files.test.kind==="fasta"||!mapping().sequence||!mapping().label)return;
   if(!supportsTask()){$("dataset-summary").innerHTML='<div class="warning-text">Update your connector to use continuous values.</div>';$("dataset-summary").classList.remove("hidden");return;}
+  if(files.train.curation&&files.test.curation&&files.train.curation.protocol!==files.test.curation.protocol){$("dataset-summary").textContent="Choose training and test sets with the same cluster holdout.";$("dataset-summary").classList.remove("hidden");return;}
   const revision=validationRevision;
   try{
     $("dataset-summary").textContent="Checking the datasets on your compute…";$("dataset-summary").classList.remove("hidden");
@@ -139,11 +143,14 @@ function datasetDetail(data){
   const destination=data.compute_name?" · On "+data.compute_name:"";
   if(data.kind==="fasta")return data.rows.toLocaleString()+" sequences · Sequences imported; attach an annotation table to train"+destination;
   const detail=[data.rows.toLocaleString()+" rows · "+data.columns.length+" columns"];
+  if(data.curation)detail.push("Sampled from the annotated viral corpus · "+data.curation.protocol.replace("cluster","")+"% cluster holdout");
+  if(data.input_table_format==="mmseqs_cluster")detail.push("Cluster membership · protein_id matches sequences; cluster_id is the group");
+  if(data.unmatched_metadata_rows)detail.push(data.unmatched_metadata_rows.toLocaleString()+" metadata rows not used");
   for(const [key,label] of [["matched_rows","matched proteins"],["unmatched_annotation_rows","annotation rows not used"],["unannotated_sequence_rows","sequences without annotations"]])if(Number.isInteger(data[key])&&data[key]>=0)detail.push(data[key].toLocaleString()+" "+label);
   return detail.join(" · ")+destination;
 }
 function datasetObjectFormat(key){return backgroundDatasetImports?/\.(csv|tsv|fa|faa|fasta)(\.gz)?$/i.test(key):/\.(csv|tsv)$/i.test(key);}
-function annotationTableRows(){return datasetCatalogObjects().filter(row=>/\.(csv|tsv)(\.gz)?$/i.test(row.object.key));}
+function annotationTableRows(){return datasetCatalogObjects().filter(row=>/\.(csv|tsv)(\.gz)?$/i.test(row.object.key)||(!annotationDialogState?.sequence?.columns?.includes("sequence")&&datasetObjectFormat(row.object.key)));}
 function datasetCatalogSignature(store){return JSON.stringify([store.id,store.bucket,store.prefix,store.configured]);}
 function datasetChoiceValue(storeID,object){return JSON.stringify([storeID,object.key,object.selection_id]);}
 function datasetCatalogObjects(){
@@ -154,13 +161,16 @@ function datasetCatalogObjects(){
 }
 function renderDatasetChoices(){
   const available=datasetCatalogObjects(),entries=[...datasetCatalog.values()],loading=entries.some(e=>e.loading),hasMore=entries.some(e=>e.next),errors=entries.filter(e=>e.error);
+  const protocol=$("cluster-holdout").value||"cluster90";
+  $("cluster-holdout-control").classList.toggle("hidden",!stores.some(s=>s.curated));
+  $("cluster-holdout").disabled=!connected||importingDatasets>0;
   for(const split of ["train","test"]){
     const select=$(split+"-dataset-select"),choice=datasetImports[split]?.choice||datasetChoices[split],snapshot=files[split];
     let html='<option value="" disabled>Choose a '+(split==="train"?"training":"test")+' dataset</option>';
     if(snapshot&&!available.some(row=>row.value===choice))html+=`<option value="${esc(choice||"imported-snapshot")}" disabled>${esc(snapshot.name)} · imported snapshot</option>`;
     for(const store of stores){
-      const rows=available.filter(row=>row.store.id===store.id);
-      if(rows.length)html+=`<optgroup label="${esc(store.name)}">${rows.map(row=>`<option value="${esc(row.value)}">${esc(row.object.key)}</option>`).join("")}</optgroup>`;
+      const rows=available.filter(row=>row.store.id===store.id&&(!row.object.split||row.object.split===split)&&(!row.object.protocol||row.object.protocol===protocol));
+      if(rows.length)html+=`<optgroup label="${esc(store.name)}">${rows.map(row=>`<option value="${esc(row.value)}">${esc(row.object.label||row.object.key)}</option>`).join("")}</optgroup>`;
     }
     if(select.datasetOptionsHTML!==html){select.innerHTML=html;select.datasetOptionsHTML=html;}
     select.value=choice||(snapshot?"imported-snapshot":"");
@@ -168,7 +178,7 @@ function renderDatasetChoices(){
     select.setAttribute("aria-busy",String(!!datasetImports[split]));
     $(split+"-import-cancel").classList.toggle("hidden",!datasetImports[split]?.background);
     $(split+"-import-cancel").disabled=!!datasetImports[split]?.cancelRequested||!connected;
-    $(split+"-attach-annotations").classList.toggle("hidden",snapshot?.kind!=="fasta");
+    $(split+"-attach-annotations").classList.toggle("hidden",!snapshot||!!snapshot.curation);
     $(split+"-attach-annotations").disabled=!connected||!backgroundDatasetImports||!!datasetImports[split];
   }
   const formats=backgroundDatasetImports?"CSV/TSV/FASTA":"CSV/TSV",formatWords=backgroundDatasetImports?"CSV, TSV, or FASTA":"CSV or TSV";
@@ -176,6 +186,7 @@ function renderDatasetChoices(){
   if(!connected)message="Connect this computer to choose datasets from your saved storage.";
   else if(!stores.length)message="Connect storage to populate your training and test choices.";
   else if(loading)message="Reading file choices from your storage…"+(available.length?" "+available.length.toLocaleString()+" "+formats+" files found.":"");
+  else if(available.length&&available.every(row=>row.object.virtual))message="Annotated viral proteins · Choose matching training and test samples with a 90% or 30% cluster holdout. Sequences and metadata are included.";
   else if(available.length)message=available.length.toLocaleString()+" "+formats+" file"+(available.length===1?"":"s")+" available. Select a file to import it.";
   else if(hasMore)message="No "+formatWords+" datasets in the files loaded so far. Load more files or browse a specific folder.";
   else message="No "+formatWords+" dataset files found in the connected folders. Browse storage to choose another folder.";
@@ -189,6 +200,16 @@ function renderDatasetChoices(){
   $("more-datasets").classList.toggle("hidden",!connected||!hasMore);
   $("more-datasets").disabled=loading;
   if(annotationDialogState)renderAnnotationControls();
+}
+function changeClustering(){
+  if(importingDatasets)return;
+  for(const split of ["train","test"]){
+    files[split]=null;datasetChoices[split]="";datasetRevision[split]++;
+    $(split+"-filename").textContent="Choose from the annotated viral collection";
+    $(split+"-detail").textContent=split==="train"?"Used to train your model":"Reserved for the final evaluation";
+    $(split+"-drop").classList.remove("filled");
+  }
+  datasetChanged();renderDatasetChoices();
 }
 function seedDatasetCatalog(store,result){
   if(!store?.configured)return;
@@ -270,7 +291,7 @@ function openStorage(split){
   if(stores.length&&!needsCredentials)listStorage(false);
 }
 function renderStorageRows(){
-  $("storage-objects").innerHTML=storageRows.length?storageRows.map((o,i)=>`<button type="button" class="storage-object" data-storage-object="${i}" ${o.supported?"":"disabled"}><span><strong>${esc(o.key)}</strong><small>${Number.isFinite(o.size)?formatImportBytes(o.size):""}${o.last_modified?" · "+esc(o.last_modified):""}</small></span><span>${o.supported?"Select ↗":o.size===0?"Empty file":o.size>maxImportBytes?"Exceeds "+formatImportBytes(maxImportBytes):"Unavailable"}</span></button>`).join(""):'<p class="small">No files found in this folder.</p>';
+  $("storage-objects").innerHTML=storageRows.length?storageRows.map((o,i)=>(o.split&&o.split!==storageSplit)||(o.protocol&&o.protocol!==($("cluster-holdout").value||"cluster90"))?"":`<button type="button" class="storage-object" data-storage-object="${i}" ${o.supported?"":"disabled"}><span><strong>${esc(o.label||o.key)}</strong><small>${o.virtual?"Matched sequences and metadata · Prepared on Adroit over SSH":Number.isFinite(o.size)?formatImportBytes(o.size):""}${o.last_modified?" · "+esc(o.last_modified):""}</small></span><span>${o.supported?"Select ↗":o.size===0?"Empty file":o.size>maxImportBytes?"Exceeds "+formatImportBytes(maxImportBytes):"Unavailable"}</span></button>`).join(""):'<p class="small">No files found in this folder.</p>';
   document.querySelectorAll("[data-storage-object]").forEach(b=>b.addEventListener("click",()=>importStorageObject(storageRows[Number(b.dataset.storageObject)])));
   $("storage-more").classList.toggle("hidden",!storageNext);
 }
@@ -342,6 +363,11 @@ function importProgress(operation,job){
 async function runDatasetJob(body,operation){
   const compute=body.compute||selectedCompute();
   if(!compute)throw new Error("Configure your SSH compute before importing datasets.");
+  if(body.key&&/\.(csv|tsv)(\.gz)?$/i.test(body.key)){
+    const format=$(operation.annotation?"annotations-table-format":"table-format").value||"auto";
+    if(format!=="auto")body={...body,table_format:format};
+    else if(/(?:^|\/)clusters?[_-](30|90|98)\.tsv(\.gz)?$/i.test(body.key))body={...body,table_format:"mmseqs_cluster"};
+  }
   const queued=await api("/api/imports",{...body,compute});
   if(!/^[a-f0-9]{32}$/.test(queued.id||""))throw new Error("The connector returned an invalid import reference.");
   operation.jobID=queued.id;
@@ -378,15 +404,18 @@ async function cancelDatasetImport(split){
 function importStorageObject(object){return importDataset({store_id:$("storage-select").value,key:object.key,etag:object.etag,selection_id:object.selection_id});}
 function openAnnotations(split){
   const sequence=files[split];
-  if(!connected||!backgroundDatasetImports||sequence?.kind!=="fasta"||datasetImports[split])return;
+  if(!connected||!backgroundDatasetImports||!sequence||datasetImports[split])return;
   annotationDialogState={split,sequence,epoch:datasetConnectionEpoch,revision:datasetRevision[split],annotations:null,choice:""};
   const rows=annotationTableRows();
   $("annotations-dataset-select").innerHTML='<option value="">Choose an annotation table</option>'+rows.map(row=>`<option value="${esc(row.value)}">${esc(row.store.name)} · ${esc(row.object.key)}</option>`).join("");
   $("annotations-dataset-select").value="";
+  $("annotations-table-format").value="auto";
+  $("annotations-base-id").innerHTML=sequence.columns.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join("");
+  $("annotations-base-id").value=sequence.columns.find(c=>/^(protein_id|id|accession|acc)$/i.test(c))||"";
   $("annotations-allow-extra").checked=false;
   $("annotations-id-column").innerHTML='<option value="">Import a table first</option>';
-  $("annotations-status").textContent=rows.length?"Choose a CSV or TSV table with protein IDs and the annotation to predict.":"No annotation tables found. Refresh your dataset choices or browse a folder containing a CSV or TSV table.";
-  $("annotations-dialog-title").textContent="Annotate your "+(split==="train"?"training":"test")+" sequences";
+  $("annotations-status").textContent=rows.length?"Attach a metadata table or protein FASTA by matching IDs. Its columns will be available as targets.":"No metadata or sequence files found. Refresh your dataset choices.";
+  $("annotations-dialog-title").textContent="Add metadata or sequences";
   renderAnnotationControls();$("annotations-dialog").showModal();
 }
 function annotationContextCurrent(context){return !!context&&connected&&context.epoch===datasetConnectionEpoch&&files[context.split]===context.sequence&&datasetRevision[context.split]===context.revision;}
@@ -395,8 +424,9 @@ function renderAnnotationControls(){
   $("annotations-dataset-select").disabled=!valid||!!active;
   $("annotations-import").disabled=!valid||!!active||!$("annotations-dataset-select").value;
   $("annotations-id-column").disabled=!valid||!!active||!context?.annotations;
+  $("annotations-base-id").disabled=!valid||!!active;
   $("annotations-allow-extra").disabled=!valid||!!active;
-  $("annotations-join").disabled=!valid||!!active||!context?.annotations||!$("annotations-id-column").value;
+  $("annotations-join").disabled=!valid||!!active||!context?.annotations||!$("annotations-id-column").value||!$("annotations-base-id").value;
   $("annotations-cancel").classList.toggle("hidden",!active?.annotation);
   $("annotations-cancel").disabled=!connected||!!active?.cancelRequested;
 }
@@ -412,7 +442,9 @@ async function importAnnotations(){
 async function joinAnnotations(){
   const context=annotationDialogState,column=$("annotations-id-column").value;
   if(!annotationContextCurrent(context)||datasetImports[context.split]||!context.annotations?.columns.includes(column))return;
-  await annotationJob(context,{kind:"join",sequence_ref:context.sequence.id,annotations_ref:context.annotations.id,annotation_id_column:column,allow_unmatched_annotations:$("annotations-allow-extra").checked===true},true);
+  const baseColumn=$("annotations-base-id").value;
+  if(!context.sequence.columns.includes(baseColumn))return;
+  await annotationJob(context,{kind:"metadata-join",sequence_ref:context.sequence.id,annotations_ref:context.annotations.id,base_id_column:baseColumn,annotation_id_column:column,allow_unmatched_annotations:$("annotations-allow-extra").checked===true},true);
 }
 async function annotationJob(context,body,join){
   body={...body,compute:context.sequence.compute_id||selectedCompute()};
@@ -426,12 +458,11 @@ async function annotationJob(context,body,join){
       acceptDataset(split,dataset);context.revision=datasetRevision[split];
       if(annotationDialogState===context)$("annotations-dialog").close();
     }else{
-      if(dataset.kind==="fasta")throw new Error("Choose a CSV or TSV annotation table.");
       context.annotations=dataset;
       if(annotationDialogState===context){
         $("annotations-id-column").innerHTML='<option value="">Choose the protein ID column</option>'+dataset.columns.map(column=>`<option value="${esc(column)}">${esc(column)}</option>`).join("");
         $("annotations-id-column").value=dataset.columns.find(column=>/^(id|protein_id|accession)$/i.test(column))||"";
-        $("annotations-status").textContent=dataset.rows.toLocaleString()+" annotation rows imported. Choose the ID column that matches your FASTA identifiers, then attach annotations.";
+        $("annotations-status").textContent=dataset.rows.toLocaleString()+" rows imported. Match the protein ID columns, then attach. Existing columns and row order are preserved.";
       }
       $(split+"-detail").textContent=datasetDetail(context.sequence);
     }
@@ -697,6 +728,8 @@ function applyWorkspaceState(data){
   backgroundDatasetImports=data.remote_dataset_imports===true;maxImportBytes=backgroundDatasetImports?(Number(data.max_import_bytes)||16*1024**3):24*1024**2;datasetFormats=Array.isArray(data.dataset_formats)?data.dataset_formats:["csv","tsv"];
   $("remote-import-limits").textContent=backgroundDatasetImports?"Storage imports: CSV, TSV, or FASTA, including gzip, up to "+formatImportBytes(maxImportBytes)+" per file. Files go directly from storage to your SSH compute.":"Update your connector to import directly to your SSH compute. Files remain in storage until you import them.";
   profiles=data.profiles;const nextCompute=preferredCompute(data);if(selectedComputeID&&nextCompute!==selectedComputeID){files.train=null;files.test=null;readyValidationID="";validationRevision++;}selectedComputeID=nextCompute;runs=data.runs;checks=data.checks;stores=data.stores||[];supportedTaskTypes=Array.isArray(data.task_types)?data.task_types:["classification"];storageAuthMethods=Array.isArray(data.storage_auth_methods)?data.storage_auth_methods:[];connectionUI(true);taskTypeHelp();storageCredentialsUI();renderCompute();renderRuns();
+  $("curated-target-note").classList.toggle("hidden",!stores.some(s=>s.curated));
+  if(stores.some(s=>s.curated))$("remote-import-limits").textContent="Demo-sized samples from 1,424,494 annotated viral proteins. Select a 90% or 30% protein-cluster holdout; every imported sample includes matched sequences and metadata. Original archives stay in R2.";
   syncDatasetCatalog();
 }
 async function refresh(){
@@ -716,10 +749,12 @@ for(const split of ["train","test"]){
 }
 $("annotations-dataset-select").addEventListener("change",()=>{if(annotationDialogState){annotationDialogState.annotations=null;$("annotations-id-column").innerHTML='<option value="">Import a table first</option>';}renderAnnotationControls();});
 $("annotations-id-column").addEventListener("change",renderAnnotationControls);
+$("annotations-base-id").addEventListener("change",renderAnnotationControls);
 $("annotations-import").addEventListener("click",importAnnotations);
 $("annotations-join").addEventListener("click",joinAnnotations);
 $("annotations-cancel").addEventListener("click",()=>{if(annotationDialogState)cancelDatasetImport(annotationDialogState.split);});
 $("annotations-dialog").addEventListener("close",()=>{annotationDialogState=null;});
+$("cluster-holdout").addEventListener("change",changeClustering);
 $("refresh-datasets").addEventListener("click",()=>syncDatasetCatalog(true));
 $("more-datasets").addEventListener("click",()=>syncDatasetCatalog(false,true));
 for(const id of ["sequence-column","label-column","id-column","group-column"])$(id).addEventListener("change",scheduleSummary);
