@@ -137,7 +137,7 @@ function taxonomySummary(data){
 }
 function taxonomyBaseline(result){
   const control=result?.taxonomy_control;
-  if(control?.schema_version!==1||control?.type!=="training-taxonomy-lookup"||control?.available!==true)return '<section class="taxonomy-baseline taxonomy-unavailable" aria-label="Taxonomy baseline">Taxonomy baseline: unavailable</section>';
+  if(control?.schema_version!==1||control?.type!=="training-family-lookup"||control?.available!==true)return '<section class="taxonomy-baseline taxonomy-unavailable" aria-label="Family baseline">Family baseline: unavailable</section>';
   const continuous=(result.task_type||result.dataset?.task_type)==="regression";
   const metrics=continuous?[["RMSE","rmse"],["MAE","mae"],["R²","r2"],["Pearson","pearson"]]:[["AUROC","auroc"],["Balanced accuracy","balanced_accuracy",true],["Accuracy","accuracy",true],["Macro F1","macro_f1"],["Average precision","average_precision"]];
   const count=value=>Number.isSafeInteger(value)&&value>=0?value.toLocaleString():"—";
@@ -148,7 +148,7 @@ function taxonomyBaseline(result){
     return prefix+(continuous?numberText(value):value.toFixed(key==="auroc"?4:3));
   };
   const rows=metrics.map(([label,key,percentage])=>`<tr><th scope="row">${label}</th><td>${esc(format(result.metrics?.[key],key,percentage))}</td><td>${esc(format(control.metrics?.[key],key,percentage))}</td><td>${esc(format(control.gain?.[key],key,percentage,true))}</td></tr>`).join("");
-  return `<section class="taxonomy-baseline" aria-label="Taxonomy baseline"><h3>Taxonomy baseline</h3><div class="taxonomy-baseline-coverage"><span>Taxonomy matches: ${count(control.coverage?.matched_rows)}/${count(control.coverage?.total_rows)}</span><span>Global fallback: ${count(control.coverage?.global_fallback)}</span></div><div class="table-wrap"><table><thead><tr><th scope="col">Metric</th><th scope="col">Model</th><th scope="col">Taxonomy</th><th scope="col">Gain</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
+  return `<section class="taxonomy-baseline" aria-label="Family baseline"><h3>Family baseline</h3><div class="taxonomy-baseline-coverage"><span>Family matches: ${count(control.coverage?.matched_rows)}/${count(control.coverage?.total_rows)}</span><span>Global fallback: ${count(control.coverage?.global_fallback)}</span></div><div class="table-wrap"><table><thead><tr><th scope="col">Metric</th><th scope="col">Model</th><th scope="col">Family</th><th scope="col">Gain</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
 }
 function evaluationWarnings(data,extra=[]){
   const messages=[...(Array.isArray(data.warnings)?data.warnings:[]),...(Array.isArray(extra)?extra:[])];
