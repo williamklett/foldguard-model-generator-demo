@@ -4,8 +4,8 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="Build and evaluate models for protein annotations.">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' http://127.0.0.1:8773 http://localhost:8773; img-src 'self' data:; object-src 'none'; base-uri 'self'">
-  <title>Foldguard Model Generator</title><link rel="stylesheet" href="./reference.css?v=1.3.1">
-  <script src="./app.js?v=1.3.1" defer></script>
+  <title>Foldguard Model Generator</title><link rel="stylesheet" href="./reference.css?v=1.3.2">
+  <script src="./app.js?v=1.3.2" defer></script>
 </head>
 <body>
 <aside class="sidebar">
@@ -29,7 +29,7 @@
         <div class="dataset-catalog-toolbar"><p id="dataset-catalog-status" role="status" aria-live="polite">Connect this computer to choose datasets from your saved storage.</p><div><button class="subtle-link" type="button" id="refresh-datasets" disabled>Refresh ↻</button><button class="subtle-link hidden" type="button" id="more-datasets">Load more files ↓</button></div></div>
         <div class="storage-note">Read directly from R2, S3, or a signed HTTPS link. Your connector accesses the files; storage credentials stay on your computer.</div>
         <details class="local-upload"><summary>Have a file on this computer?</summary><div class="form-grid"><label>Training file<input id="train-file" type="file" accept=".csv,.tsv,text/csv,text/tab-separated-values"></label><label>Test file<input id="test-file" type="file" accept=".csv,.tsv,text/csv,text/tab-separated-values"></label></div></details>
-        <div class="format-note"><span>ⓘ</span> One protein per row. Include a sequence and the annotation to predict. Maximum 1,000 residues per protein.</div>
+        <div class="format-note"><span>ⓘ</span> One protein per row. Include a sequence and the annotation to predict. Up to 25,000 rows per file and 1,000 residues per protein.</div>
       </section>
       <section class="panel"><div class="section-heading"><span class="step">02</span><div><h2>Choose your annotation</h2><p>Choose the annotation column the model should predict.</p></div><span class="pill" id="annotation-type-badge">Discrete categories</span></div>
         <label class="annotation-type">Annotation type<select id="task-type"><option value="classification">Discrete categories</option><option value="regression">Continuous value</option></select></label><p id="annotation-type-help" class="annotation-help">Predict a category such as location or function. Include at least five training proteins per category.</p>

@@ -80,7 +80,7 @@ function acceptDataset(split, data, choice="") {
   files[split]=data;
   datasetChoices[split]=choice;
   $(split+"-filename").textContent=data.name;
-  $(split+"-detail").textContent=data.rows.toLocaleString()+" proteins · "+data.columns.length+" columns";
+  $(split+"-detail").textContent=data.rows.toLocaleString()+" rows · "+data.columns.length+" columns";
   $(split+"-drop").classList.add("filled");
   renderDatasetChoices();
   datasetChanged();
@@ -302,12 +302,15 @@ async function importDataset(body,options={}){
   }catch(error){
     if(connected&&epoch===datasetConnectionEpoch&&revision===datasetRevision[split]){
       if(dialog&&session===storageSession)storageStatus(error.message,true);
-      else if(!dialog){$(split+"-detail").textContent=files[split]?files[split].rows.toLocaleString()+" proteins · "+files[split].columns.length+" columns":"Import failed · choose a dataset again";notice(error.message,true);}
+      else if(!dialog){
+        const message=typeof error?.message==="string"&&error.message.trim()?error.message:"The dataset could not be imported.";
+        $(split+"-detail").textContent="Import failed · "+message;notice(message,true);
+      }
     }
   }
   finally{
     datasetImports[split]=null;importingDatasets--;connectionUI(connected);
-    if(!dialog&&epoch!==datasetConnectionEpoch&&revision===datasetRevision[split])$(split+"-detail").textContent=files[split]?files[split].rows.toLocaleString()+" proteins · "+files[split].columns.length+" columns":"Choose a dataset after reconnecting";
+    if(!dialog&&epoch!==datasetConnectionEpoch&&revision===datasetRevision[split])$(split+"-detail").textContent=files[split]?files[split].rows.toLocaleString()+" rows · "+files[split].columns.length+" columns":"Choose a dataset after reconnecting";
     if(dialog&&session===storageSession){$("import-url").disabled=false;renderStorageRows();}
   }
 }
