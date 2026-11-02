@@ -136,7 +136,7 @@ async function validateSummary(){
     const extra=continuous?`<span><strong>${esc(numberText(data.target_summary.train.min))}–${esc(numberText(data.target_summary.train.max))}</strong>training value range</span>`:`<span><strong>${data.classes.length}</strong>classes</span>`;
     const target=continuous?`<div class="target-summary">Test value range: ${esc(numberText(data.target_summary.test.min))} to ${esc(numberText(data.target_summary.test.max))}<br>Training mean: ${esc(numberText(data.target_summary.train.mean))} · Standard deviation: ${esc(numberText(data.target_summary.train.std))}</div>`:"";
     const countLines=[];
-    for(const [counts,label] of [[data.source_rows,"Source rows"],[data.excluded_unlabeled,"Excluded for blank annotations"]]){
+    for(const [counts,label] of [[data.source_rows,"Source rows"],[data.excluded_unlabeled,"Excluded for blank annotations"],[data.excluded_duplicates,"Consolidated identical labeled proteins"]]){
       if(Number.isSafeInteger(counts?.train)&&counts.train>=0&&Number.isSafeInteger(counts?.test)&&counts.test>=0)countLines.push(`${label}: ${counts.train.toLocaleString()} training · ${counts.test.toLocaleString()} test`);
     }
     const inputCounts=countLines.length?`<div class="target-summary">${countLines.join("<br>")}</div>`:"";
