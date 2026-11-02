@@ -66,8 +66,9 @@ function populateColumns() {
     ["group-column","No group column",/^(family|family_taxid|group|component_id|cluster|cluster_id)$/i]];
   for(const [id,empty,pattern] of definitions){
     const select=$(id),current=select.value;
+    const preferred=id==="label-column"&&(files.train?.curation||files.test?.curation)?fields.find(f=>/^function_class$/i.test(f)):"";
     select.innerHTML=(empty?`<option value="">${empty}</option>`:`<option value="">Choose a column</option>`)+fields.map(f=>`<option value="${esc(f)}">${esc(f)}</option>`).join("");
-    select.value=fields.includes(current)?current:(fields.find(f=>pattern.test(f))||"");
+    select.value=fields.includes(current)?current:(preferred||fields.find(f=>pattern.test(f))||"");
   }
   const group=files.train?.curation?.group_column||files.test?.curation?.group_column;
   if(group&&fields.includes(group))$("group-column").value=group;
@@ -103,7 +104,7 @@ function taskTypeHelp(){
   const continuous=taskType()==="regression";
   $("annotation-type-badge").textContent=continuous?"Continuous value":"Discrete categories";
   $("dataset-template").href=continuous?"./regression-train-template.csv":"./train-template.csv";
-  $("annotation-type-help").textContent=continuous?(connected&&!supportsTask()?"Update your connector to use continuous values.":"Predict a numeric measurement. Every annotation must be a finite number. Include at least 10 training and two test proteins."):"Predict a category such as location or function. Include at least five training proteins per category.";
+  $("annotation-type-help").textContent=continuous?(connected&&!supportsTask()?"Update your connector to use continuous values.":"Predict a numeric measurement. Rows with blank annotations are excluded; populated values must be finite numbers. Include at least 10 labeled training and two labeled test proteins."):"Predict a category such as location or function. Rows with blank annotations are excluded. Include at least five labeled training proteins per category.";
 }
 function updateTaskType(){
   taskTypeHelp();
@@ -134,7 +135,12 @@ async function validateSummary(){
     const continuous=data.task_type==="regression";
     const extra=continuous?`<span><strong>${esc(numberText(data.target_summary.train.min))}–${esc(numberText(data.target_summary.train.max))}</strong>training value range</span>`:`<span><strong>${data.classes.length}</strong>classes</span>`;
     const target=continuous?`<div class="target-summary">Test value range: ${esc(numberText(data.target_summary.test.min))} to ${esc(numberText(data.target_summary.test.max))}<br>Training mean: ${esc(numberText(data.target_summary.train.mean))} · Standard deviation: ${esc(numberText(data.target_summary.train.std))}</div>`:"";
-    $("dataset-summary").innerHTML=`<div class="summary-grid${continuous?" numeric-summary":""}"><span><strong>${data.train_rows.toLocaleString()}</strong>training proteins</span><span><strong>${data.test_rows.toLocaleString()}</strong>test proteins</span>${extra}</div>${target}<div>${data.group_disjoint?"✓ Supplied groups are disjoint":"No family/group holdout supplied"} · Exact train/test duplicates excluded</div><div class="warning-text">${data.homology_screened?"":"Sequence similarity between sets is not screened."}</div>`;
+    const countLines=[];
+    for(const [counts,label] of [[data.source_rows,"Source rows"],[data.excluded_unlabeled,"Excluded for blank annotations"]]){
+      if(Number.isSafeInteger(counts?.train)&&counts.train>=0&&Number.isSafeInteger(counts?.test)&&counts.test>=0)countLines.push(`${label}: ${counts.train.toLocaleString()} training · ${counts.test.toLocaleString()} test`);
+    }
+    const inputCounts=countLines.length?`<div class="target-summary">${countLines.join("<br>")}</div>`:"";
+    $("dataset-summary").innerHTML=`<div class="summary-grid${continuous?" numeric-summary":""}"><span><strong>${data.train_rows.toLocaleString()}</strong>training proteins</span><span><strong>${data.test_rows.toLocaleString()}</strong>test proteins</span>${extra}</div>${inputCounts}${target}<div>${data.group_disjoint?"✓ Supplied groups are disjoint":"No family/group holdout supplied"} · Exact train/test duplicates excluded</div><div class="warning-text">${data.homology_screened?"":"Sequence similarity between sets is not screened."}</div>`;
     $("dataset-summary").classList.remove("hidden");readyValidationID=queued.id;connectionUI(connected);
   }catch(error){if(revision===validationRevision){$("dataset-summary").innerHTML=`<div class="warning-text">${esc(error.message)}</div>`;$("dataset-summary").classList.remove("hidden");}}
 }
