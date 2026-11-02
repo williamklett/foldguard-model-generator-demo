@@ -13,6 +13,7 @@ const datasetRevision = {train:0,test:0}, pendingFiles = {train:null,test:null};
 let storageSplit = "train", storageSession = 0, storageRequest = 0, storageNext = null, storageRows = [], storageLoading = false;
 let pairingWindow = null, pairingState = "", pairingTimer = null, importingDatasets = 0;
 const randomID = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), b=>b.toString(16).padStart(2,"0")).join("");
+const validConnectionToken = value => typeof value === "string" && /^[A-Za-z0-9_-]{32,256}$/.test(value);
 
 function notice(message, error=false) {
   $("notice").textContent = message;
@@ -193,8 +194,9 @@ async function importDataset(body){
 function importStorageObject(object){return importDataset({store_id:$("storage-select").value,key:object.key,etag:object.etag,selection_id:object.selection_id});}
 function storageCredentialsUI(){const env=$("store-auth").value==="env";document.querySelectorAll(".store-env").forEach(el=>el.classList.toggle("hidden",!env));document.querySelectorAll(".store-profile").forEach(el=>el.classList.toggle("hidden",env));}
 async function finishConnection(value){
-  token=value;sessionStorage.setItem("foldguard-service-token",token);await refresh();
-  if(!connected)throw new Error("The connector did not accept this connection.");
+  token=value;
+  const data=await api("/api/state",undefined,{timeout:15000});
+  applyWorkspaceState(data);sessionStorage.setItem("foldguard-service-token",token);
   $("service-token").value=token;if($("connection-dialog").open)$("connection-dialog").close();clearNotice();await uploadPendingFiles();scheduleSummary();
 }
 async function startPairing(){
@@ -204,14 +206,19 @@ async function startPairing(){
   pairingTimer=setTimeout(()=>{pairingState="";$("pair-status").textContent="The connection window expired. Start your connector and try again.";},180000);
 }
 window.addEventListener("message",async event=>{
-  if(event.origin!==location.origin||event.source!==pairingWindow||!pairingState||event.data?.type!=="foldguard:paired"||event.data.state!==pairingState||typeof event.data.token!=="string")return;
+  if(!pairingWindow||![new URL(base).origin,location.origin].includes(event.origin)||event.source!==pairingWindow||!pairingState||event.data?.type!=="foldguard:paired"||event.data.state!==pairingState||!validConnectionToken(event.data.token))return;
+  const popup=pairingWindow,state=pairingState;
   clearTimeout(pairingTimer);pairingState="";
-  try{await finishConnection(event.data.token);pairingWindow?.close();pairingWindow=null;}catch(error){$("pair-status").textContent="Could not connect. Start the connector and try again.";notice(error.message,true);}
+  try{
+    await finishConnection(event.data.token);
+    try{popup.postMessage({type:"foldguard:pair-ack",state},event.origin);popup.close();}catch(error){/* Connection already verified; a closed popup needs no acknowledgment. */}
+    if(pairingWindow===popup)pairingWindow=null;
+  }catch(error){connectionUI(false);$("pair-status").textContent="Could not connect. "+error.message;notice(error.message,true);}
 });
 function receivePairingFragment(){
   const fragment=new URLSearchParams(location.hash.slice(1));if(!fragment.has("connect_token"))return false;
   const value=fragment.get("connect_token"),state=fragment.get("state");history.replaceState(null,"",location.pathname+location.search);
-  if(!/^[a-f0-9]{32}$/.test(state||"")||!value||value.length>256)return false;
+  if(!/^[a-f0-9]{32}$/.test(state||"")||!validConnectionToken(value))return false;
   token=value;sessionStorage.setItem("foldguard-service-token",token);
   if(window.opener){try{window.opener.postMessage({type:"foldguard:paired",state,token:value},location.origin);setTimeout(()=>window.close(),200);}catch(error){/* This tab can connect independently. */}}
   return true;
@@ -338,9 +345,12 @@ function renderMonitor(view){
   renderMetrics(view);previousView=view;
 }
 async function refreshRun(){if(!currentRun||!connected)return;const view=await api("/api/runs/"+currentRun);renderMonitor(view);}
+function applyWorkspaceState(data){
+  profiles=data.profiles;runs=data.runs;checks=data.checks;stores=data.stores||[];supportedTaskTypes=Array.isArray(data.task_types)?data.task_types:["classification"];connectionUI(true);taskTypeHelp();renderCompute();renderRuns();
+}
 async function refresh(){
   if(polling||!token)return;polling=true;
-  try{const data=await api("/api/state",undefined,{timeout:15000});profiles=data.profiles;runs=data.runs;checks=data.checks;stores=data.stores||[];supportedTaskTypes=Array.isArray(data.task_types)?data.task_types:["classification"];connectionUI(true);taskTypeHelp();renderCompute();renderRuns();await refreshRun();}
+  try{const data=await api("/api/state",undefined,{timeout:15000});applyWorkspaceState(data);await refreshRun();}
   catch(error){connectionUI(false);if(currentRun)$("progress-caption").textContent="Companion unavailable. Reconnect to refresh this run.";}
   finally{polling=false;}
 }
