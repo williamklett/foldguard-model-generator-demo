@@ -4,8 +4,8 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="Build and evaluate models for protein annotations.">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' http://127.0.0.1:8773 http://localhost:8773; img-src 'self' data:; object-src 'none'; base-uri 'self'">
-  <title>Foldguard Model Generator</title><link rel="stylesheet" href="./reference.css?v=1.11.0">
-  <script src="./app.js?v=1.11.0" defer></script>
+  <title>Foldguard Model Generator</title><link rel="stylesheet" href="./reference.css?v=1.12.0">
+  <script src="./app.js?v=1.12.0" defer></script>
 </head>
 <body>
 <aside class="sidebar">
@@ -23,7 +23,7 @@
     <div class="builder-grid"><div class="setup-column">
       <section class="panel"><div class="section-heading"><span class="step">01</span><div><h2>Datasets</h2></div><a class="subtle-link" id="dataset-template" href="./train-template.csv" download>Template ↗</a></div>
         <div class="form-grid"><label class="annotation-type hidden" id="primary-phenotype-control">Annotation<select id="primary-phenotype"><option value="">Select annotation</option></select></label>
-        <label class="annotation-type hidden" id="cluster-holdout-control">Holdout<select id="cluster-holdout"><option value="cluster90">90% identity</option><option value="cluster30">30% identity</option></select></label></div>
+        <label class="annotation-type hidden" id="cluster-holdout-control">Holdout<select id="cluster-holdout"><option value="cluster90">90% identity</option><option value="cluster30">30% identity</option></select></label><label class="annotation-type hidden" id="split-fold-control">Fold<select id="split-fold"><option value="0">Fold 0</option></select></label></div>
         <div class="upload-grid">
           <div class="upload-card dataset-card" id="train-drop"><span class="upload-icon">▤</span><strong id="train-dataset-label">Training set</strong><select id="train-dataset-select" aria-labelledby="train-dataset-label" aria-describedby="dataset-catalog-status train-detail" disabled><option value="" disabled selected>Select dataset</option></select><span class="file-name" id="train-filename"></span><small id="train-detail" role="status" aria-live="polite"></small><button class="subtle-link import-cancel hidden" type="button" id="train-import-cancel">Cancel import</button><button class="secondary hidden" type="button" id="train-attach-annotations">Attach metadata ↗</button><button class="secondary" type="button" data-storage-split="train">Browse storage ↗</button></div>
           <div class="upload-card dataset-card" id="test-drop"><span class="upload-icon">▤</span><strong id="test-dataset-label">Test set</strong><select id="test-dataset-select" aria-labelledby="test-dataset-label" aria-describedby="dataset-catalog-status test-detail" disabled><option value="" disabled selected>Select dataset</option></select><span class="file-name" id="test-filename"></span><small id="test-detail" role="status" aria-live="polite"></small><button class="subtle-link import-cancel hidden" type="button" id="test-import-cancel">Cancel import</button><button class="secondary hidden" type="button" id="test-attach-annotations">Attach metadata ↗</button><button class="secondary" type="button" data-storage-split="test">Browse storage ↗</button></div>

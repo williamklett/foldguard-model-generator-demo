@@ -87,7 +87,7 @@ function populateColumns() {
   if(group&&fields.includes(group))$("group-column").value=group;
   $("task-type").disabled=!!prebuilt;
   if(prebuilt){$("task-type").value="classification";if(typeof taskTypeHelp==="function")taskTypeHelp();}
-  if(!$("run-name").value&&$("label-column").value)$("run-name").placeholder=prebuilt?`${prebuilt.phenotype} · ${prebuilt.tier||prebuilt.protocol} · v1`:$("label-column").value+" · v1";
+  if(!$("run-name").value&&$("label-column").value)$("run-name").placeholder=prebuilt?prebuiltRunName(prebuilt):$("label-column").value+" · v1";
   scheduleSummary();
 }
 function datasetChanged() {
@@ -113,8 +113,8 @@ function runMetadata(){
   const train=files.train?.curation,test=files.test?.curation;
   let annotation=mapping().label,name=annotation+" · v1";
   if(train?.prebuilt||test?.prebuilt){
-    if(!train?.prebuilt||!test?.prebuilt||train.role!=="sourced"||test.role!=="sourced"||train.seed!==0||test.seed!==0||train.split!=="train"||test.split!=="test"||!train.pair_id||train.pair_id!==test.pair_id||train.phenotype!==test.phenotype||(train.tier||train.protocol)!==(test.tier||test.protocol))throw new Error("Training and test sets do not match");
-    annotation=train.phenotype;name=`${annotation} · ${train.tier||train.protocol} · v1`;
+    if(!train?.prebuilt||!test?.prebuilt||train.role!=="sourced"||test.role!=="sourced"||train.seed!==0||test.seed!==0||train.split!=="train"||test.split!=="test"||!prebuiltPairMatches(train,test))throw new Error("Training and test sets do not match");
+    annotation=train.phenotype;name=prebuiltRunName(train);
   }
   return {annotation,name:$("run-name").value.trim()||name};
 }
@@ -228,8 +228,9 @@ function datasetDetail(data){
   if(data.kind==="fasta")return data.rows.toLocaleString()+" sequences · Annotations required"+destination;
   const detail=[data.rows.toLocaleString()+" rows · "+data.columns.length+" columns"];
   if(data.curation?.prebuilt){
-    const c=data.curation,tier=c.tier||c.protocol;
-    detail.push(({c90:"90% identity",c50:"50% identity",c30:"30% identity",species:"Species holdout",genus:"Genus holdout",family:"Family holdout"})[tier]||"Holdout");
+    const c=data.curation;
+    detail.push(prebuiltTierLabel(c,true));
+    if(c.foldseek===true)detail.push("Fold "+prebuiltFold(c));
     if(c.max_sequence_length===1022&&Number.isSafeInteger(c.excluded_long_rows)&&c.excluded_long_rows>=0)detail.push(`${c.excluded_long_rows.toLocaleString()} over 1,022 residues excluded`);
   }
   else if(data.curation)detail.push(""+data.curation.protocol.replace("cluster","")+"% cluster holdout");
@@ -238,15 +239,31 @@ function datasetDetail(data){
   for(const [key,label] of [["matched_rows","matched proteins"],["unmatched_annotation_rows","annotation rows not used"],["unannotated_sequence_rows","sequences without annotations"]])if(Number.isInteger(data[key])&&data[key]>=0)detail.push(data[key].toLocaleString()+" "+label);
   return detail.join(" · ")+destination;
 }
+function prebuiltFold(value){return value?.fold===undefined?0:value.fold;}
+function foldseekMetadataValid(value){return value?.foldseek===true&&["protein_splits_nested_v3","protein_splits_within_genus_v3"].includes(value.release)&&Number.isSafeInteger(value.fold)&&value.fold>=0&&value.fold<=3;}
+function prebuiltTierLabel(value,detail=false){
+  const tier=value.tier||value.protocol||"";
+  if(value.foldseek===true){
+    const label=typeof value.tier_label==="string"?value.tier_label.trim():"";
+    return label&&label.length<=160&&!/[\u0000-\u001f\u007f]/.test(label)?(/^Foldseek\b/i.test(label)?label:"Foldseek · "+label):"Foldseek · "+tier.replace(/^foldseek_/,"").replace(/_/g," ");
+  }
+  return ({c90:"90% identity",c50:"50% identity",c30:"30% identity",species:detail?"Species holdout":"Species",genus:detail?"Genus holdout":"Genus",family:detail?"Family holdout":"Family"})[tier]||tier.replace(/_/g," ")||"Holdout";
+}
+function prebuiltRunName(value){return value.foldseek===true?`${value.phenotype} · ${prebuiltTierLabel(value)} · Fold ${prebuiltFold(value)} · v1`:`${value.phenotype} · ${value.tier||value.protocol} · v1`;}
+function prebuiltPairMatches(left,right){return !!left?.pair_id&&left.pair_id===right?.pair_id&&left.release===right.release&&left.phenotype===right.phenotype&&(left.tier||left.protocol)===(right.tier||right.protocol)&&prebuiltFold(left)===prebuiltFold(right)&&(left.foldseek===true)===(right.foldseek===true);}
 function datasetObjectFormat(key){return backgroundDatasetImports?/\.(csv|tsv|fa|faa|fasta)(\.gz)?$/i.test(key):/\.(csv|tsv)$/i.test(key);}
 function annotationTableRows(){return datasetCatalogObjects().filter(row=>!row.object.prebuilt&&!row.store.prebuilt&&(/\.(csv|tsv)(\.gz)?$/i.test(row.object.key)||(!annotationDialogState?.sequence?.columns?.includes("sequence")&&datasetObjectFormat(row.object.key))));}
 function datasetCatalogSignature(store){return JSON.stringify([store.id,store.bucket,store.prefix,store.configured,store.prebuilt===true]);}
 function datasetChoiceValue(storeID,object){return JSON.stringify([storeID,object.key,object.selection_id]);}
-function prebuiltCatalogCountsValid(object){return object.max_sequence_length===1022&&Number.isSafeInteger(object.rows)&&object.rows>0&&Number.isSafeInteger(object.source_rows)&&object.source_rows>=object.rows&&Number.isSafeInteger(object.excluded_long_rows)&&object.excluded_long_rows>=0&&object.source_rows-object.rows===object.excluded_long_rows;}
+function prebuiltCatalogCountsValid(object){
+  if(object.max_sequence_length!==1022||!Number.isSafeInteger(object.rows)||object.rows<=0||!Number.isSafeInteger(object.source_rows)||object.source_rows<object.rows||!Number.isSafeInteger(object.excluded_long_rows)||object.excluded_long_rows<0||object.source_rows-object.rows!==object.excluded_long_rows)return false;
+  if(object.foldseek===true&&!foldseekMetadataValid(object))return false;
+  return object.length_filter_pending!==true||(foldseekMetadataValid(object)&&object.rows===object.source_rows&&object.excluded_long_rows===0);
+}
 function prebuiltImportCountsMatch(data,object=null){
   const c=data.curation,retained=data.rows;
   if(c?.max_sequence_length!==1022||!Number.isSafeInteger(retained)||retained<=0||c.expected_rows!==retained||c.selected_rows!==retained||!Number.isSafeInteger(c.expected_source_rows)||c.expected_source_rows<retained||c.source_selected_rows!==c.expected_source_rows||!Number.isSafeInteger(c.excluded_long_rows)||c.excluded_long_rows<0||c.expected_source_rows-retained!==c.excluded_long_rows)return false;
-  return !object||(prebuiltCatalogCountsValid(object)&&retained===object.rows&&c.expected_source_rows===object.source_rows&&c.excluded_long_rows===object.excluded_long_rows);
+  return !object||(prebuiltCatalogCountsValid(object)&&c.expected_source_rows===object.source_rows&&(object.length_filter_pending===true?retained<=object.rows&&c.excluded_long_rows===object.source_rows-retained:retained===object.rows&&c.excluded_long_rows===object.excluded_long_rows));
 }
 function datasetCatalogObjects(){
   return stores.flatMap(store=>{
@@ -255,10 +272,10 @@ function datasetCatalogObjects(){
   });
 }
 function datasetObjectMatches(object,split){
-  if(object.prebuilt)return prebuiltCatalogCountsValid(object)&&object.role==="sourced"&&object.seed===0&&object.split===split&&object.phenotype===$("primary-phenotype").value&&(object.tier||object.protocol)===$("cluster-holdout").value;
+  if(object.prebuilt)return prebuiltCatalogCountsValid(object)&&object.role==="sourced"&&object.seed===0&&object.split===split&&object.phenotype===$("primary-phenotype").value&&(object.tier||object.protocol)===$("cluster-holdout").value&&prebuiltFold(object)===Number($("split-fold").value||0);
   return (!object.split||object.split===split)&&(!object.protocol||object.protocol===($("cluster-holdout").value||"cluster90"));
 }
-function datasetOptionLabel(object){return object.prebuilt?`${object.split==="train"?"Training":"Test"}${Number.isSafeInteger(object.rows)&&object.rows>=0?" · "+object.rows.toLocaleString()+" proteins":""}`:object.label||object.key;}
+function datasetOptionLabel(object){return object.prebuilt?`${object.split==="train"?"Training":"Test"}${Number.isSafeInteger(object.rows)&&object.rows>=0?" · "+object.rows.toLocaleString()+(object.length_filter_pending===true?" source proteins":" proteins"):""}`:object.label||object.key;}
 function renderPrebuiltSelectors(available){
   const prebuilt=stores.some(s=>s.prebuilt)||available.some(row=>row.object.prebuilt);
   const phenotype=$("primary-phenotype"),previous=phenotype.value;
@@ -270,14 +287,26 @@ function renderPrebuiltSelectors(available){
   $("primary-phenotype-control").classList.toggle("hidden",!prebuilt);
   phenotype.disabled=!connected||importingDatasets>0||!phenotypes.length;
   const holdout=$("cluster-holdout"),prior=holdout.value;
-  const tiers=prebuilt?[["c90","90% identity"],["c50","50% identity"],["c30","30% identity"],["species","Species"],["genus","Genus"],["family","Family"]]:[["cluster90","90% identity"],["cluster30","30% identity"]];
-  const holdoutHTML=tiers.map(([value,label])=>`<option value="${value}">${label}</option>`).join("");
+  const choices=available.filter(row=>row.object.prebuilt&&row.object.role==="sourced"&&row.object.seed===0&&row.object.phenotype===phenotype.value).map(row=>row.object);
+  const order=["c90","c50","c30","species","genus","family"];
+  const unique=[...new Map(choices.map(object=>[object.tier||object.protocol,object])).entries()].filter(([tier])=>typeof tier==="string"&&tier);
+  unique.sort(([left],[right])=>(order.includes(left)?order.indexOf(left):order.length)-(order.includes(right)?order.indexOf(right):order.length));
+  const tiers=prebuilt?unique.map(([tier,object])=>[tier,prebuiltTierLabel(object)]):[["cluster90","90% identity"],["cluster30","30% identity"]];
+  const holdoutHTML=tiers.length?tiers.map(([value,label])=>`<option value="${esc(value)}">${esc(label)}</option>`).join(""):'<option value="">Select holdout</option>';
   if(holdout.datasetOptionsHTML!==holdoutHTML){holdout.innerHTML=holdoutHTML;holdout.datasetOptionsHTML=holdoutHTML;}
   const aliases=prebuilt?{cluster90:"c90",cluster30:"c30"}:{c90:"cluster90",c30:"cluster30"};
   const selected=aliases[prior]||prior;
-  holdout.value=tiers.some(([value])=>value===selected)?selected:tiers[0][0];
+  holdout.value=tiers.some(([value])=>value===selected)?selected:(tiers[0]?.[0]||"");
   $("cluster-holdout-control").classList.toggle("hidden",!stores.some(s=>s.curated)&&!prebuilt);
-  holdout.disabled=!connected||importingDatasets>0;
+  holdout.disabled=!connected||importingDatasets>0||!tiers.length;
+  const fold=$("split-fold"),priorFold=fold.value;
+  const foldseek=choices.filter(object=>(object.tier||object.protocol)===holdout.value&&object.foldseek===true);
+  const folds=[...new Set(foldseek.map(prebuiltFold))].sort((a,b)=>a-b);
+  const foldHTML=(folds.length?folds:[0]).map(value=>`<option value="${value}">Fold ${value}</option>`).join("");
+  if(fold.datasetOptionsHTML!==foldHTML){fold.innerHTML=foldHTML;fold.datasetOptionsHTML=foldHTML;}
+  fold.value=folds.includes(Number(priorFold))?String(Number(priorFold)):String(folds[0]||0);
+  $("split-fold-control").classList.toggle("hidden",!foldseek.length);
+  fold.disabled=!connected||importingDatasets>0||!foldseek.length;
 }
 function renderDatasetChoices(){
   const available=datasetCatalogObjects(),entries=[...datasetCatalog.values()],loading=entries.some(e=>e.loading),hasMore=entries.some(e=>e.next),errors=entries.filter(e=>e.error);
@@ -304,7 +333,7 @@ function renderDatasetChoices(){
   if(!connected)message="Connector disconnected";
   else if(!stores.length)message="Storage disconnected";
   else if(loading)message="Reading storage…"+(available.length?" · "+available.length.toLocaleString()+" files":"");
-  else if(available.length&&available.every(row=>row.object.prebuilt))message="Protein splits v1";
+  else if(available.length&&available.every(row=>row.object.prebuilt))message=available.some(row=>row.object.foldseek===true)?"Protein splits":"Protein splits v1";
   else if(available.length&&available.every(row=>row.object.virtual))message="Annotated viral proteins";
   else if(available.length)message=available.length.toLocaleString()+" "+formats+" file"+(available.length===1?"":"s");
   else if(hasMore)message="No "+formats+" files · More available";
@@ -445,10 +474,10 @@ async function importDataset(body,options={}){
     if(!data||!importOperationCurrent(operation)||(!background&&dialog&&session!==storageSession))return;
     if(operation.prebuilt){
       const c=data.curation,o=operation.prebuilt;
-      if(!c?.prebuilt||c.role!=="sourced"||c.seed!==0||c.phenotype!==o.phenotype||(c.tier||c.protocol)!==(o.tier||o.protocol)||c.pair_id!==o.pair_id||c.split!==split)throw new Error("Dataset selection mismatch");
+      if(!c?.prebuilt||c.role!=="sourced"||c.seed!==0||!prebuiltPairMatches(c,o)||c.split!==split)throw new Error("Dataset selection mismatch");
       if(!prebuiltImportCountsMatch(data,o))throw new Error("Dataset length-filter counts changed; import the selected split again");
       const other=files[split==="train"?"test":"train"]?.curation;
-      if(other&&(!other.prebuilt||other.pair_id!==c.pair_id))throw new Error("Training and test sets do not match");
+      if(other&&(!other.prebuilt||!prebuiltPairMatches(other,c)))throw new Error("Training and test sets do not match");
     }
     else if(files[split==="train"?"test":"train"]?.curation?.prebuilt)throw new Error("Training and test sets do not match");
     acceptDataset(split,data,options.choice||"");
@@ -947,6 +976,7 @@ $("annotations-cancel").addEventListener("click",()=>{if(annotationDialogState)c
 $("annotations-dialog").addEventListener("close",()=>{annotationDialogState=null;});
 $("cluster-holdout").addEventListener("change",changeClustering);
 $("primary-phenotype").addEventListener("change",changeClustering);
+$("split-fold").addEventListener("change",changeClustering);
 $("refresh-datasets").addEventListener("click",()=>syncDatasetCatalog(true));
 $("more-datasets").addEventListener("click",()=>syncDatasetCatalog(false,true));
 for(const id of ["sequence-column","label-column","id-column","group-column"])$(id).addEventListener("change",scheduleSummary);
