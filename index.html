@@ -4,8 +4,8 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="Build and evaluate models for protein annotations.">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' http://127.0.0.1:8773 http://localhost:8773; img-src 'self' data:; object-src 'none'; base-uri 'self'">
-  <title>Foldguard Model Generator</title><link rel="stylesheet" href="./reference.css?v=1.10.0">
-  <script src="./app.js?v=1.10.0" defer></script>
+  <title>Foldguard Model Generator</title><link rel="stylesheet" href="./reference.css?v=1.11.0">
+  <script src="./app.js?v=1.11.0" defer></script>
 </head>
 <body>
 <aside class="sidebar">
@@ -48,7 +48,7 @@
       </section>
       <div class="launch-panel"><label>Run name<input id="run-name" maxlength="120" placeholder="Run name"></label><label class="scheduler-toggle"><input id="early-stopping" type="checkbox" checked disabled>Early stopping</label><button class="primary" id="launch-run">Build &amp; evaluate <span>↗</span></button></div>
     </div>
-    <aside class="results-column"><section class="panel run-panel"><div class="result-top"><div class="tiny-label">RUN MONITOR</div><span id="run-badge" class="pill">Ready</span></div><h2 id="monitor-name">No active run</h2><p id="monitor-message"></p><div class="pipeline-steps" id="pipeline-steps"><div><span>1</span><strong>Prepare</strong></div><div><span>2</span><strong>Train</strong></div><div><span>3</span><strong>Evaluate</strong></div></div><div class="progress-track hidden" id="progress-track"><div id="progress-fill"></div></div><p class="progress-caption" id="progress-caption"></p><button class="danger-link hidden" id="stop-run">Stop run</button></section>
+    <aside class="results-column"><section class="panel run-panel"><div class="result-top"><div class="tiny-label">RUN MONITOR</div><span id="run-badge" class="pill">Ready</span></div><h2 id="monitor-name">No active run</h2><p id="monitor-message"></p><div class="pipeline-steps" id="pipeline-steps"><div><span>1</span><strong>Prepare</strong></div><div><span>2</span><strong>Train</strong></div><div><span>3</span><strong>Evaluate</strong></div></div><div class="progress-track hidden" id="progress-track"><div id="progress-fill"></div></div><p class="progress-caption" id="progress-caption"></p><button class="danger-link hidden" id="stop-run">Stop run</button><button class="subtle-link hidden" id="finish-selection" type="button" disabled>Skip remaining passes</button></section>
     <section class="panel" id="loss-panel"><div class="result-top"><h2>Training metrics</h2><select id="loss-series" aria-label="Training pass"><option value="">Waiting for training</option></select></div><div class="training-metric-controls"><label>Metric<select id="loss-metric" disabled><option value="loss">Loss</option></select></label></div><div id="loss-chart" class="chart-placeholder"><span class="chart-ghost">╱╲__</span></div><div class="live-metric-values" role="status" aria-live="polite" aria-atomic="true"><span>Training<strong id="loss-train-value">—</strong></span><span>Internal validation<strong id="loss-validation-value">—</strong></span></div><div class="legend"><span><i class="train-color"></i>Training</span><span id="loss-validation-legend" class="hidden"><i class="val-color"></i>Internal validation</span></div></section>
     <section class="panel" id="metrics-panel"><div class="result-top"><h2>Test performance</h2><span class="tiny-label">TEST SET</span></div><div id="metrics-empty" class="metrics-empty">Pending</div><div id="metrics-content" class="hidden"></div></section>
     </aside></div>

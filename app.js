@@ -9,6 +9,7 @@ let supportedTaskTypes = ["classification"], storageAuthMethods = [], earlyStopp
 let backgroundDatasetImports = false, maxImportBytes = 24*1024**2, datasetFormats = ["csv","tsv"];
 let annotationDialogState = null, selectedComputeID = "", readyValidationID = "", terminalCommandRevision = 0;
 let polling = false, busy = false, selectedLoss = "", previousView = null;
+let finishSelectionRequest = null;
 const selectedLossMetric = {classification:"loss",regression:"loss"};
 const files = {train:null,test:null};
 let summaryTimer, renderedResultRun = null, validationRevision = 0;
@@ -44,6 +45,7 @@ function connectionUI(value) {
   $("side-status").textContent=value?"Connected":"Disconnected";
   $("launch-run").disabled=!value||busy||importingDatasets>0||!!pendingFiles.train||!!pendingFiles.test||files.train?.kind==="fasta"||files.test?.kind==="fasta"||!selectedCompute()||!readyValidationID;
   $("local-token-tools").classList.toggle("hidden",!localPage||!value);
+  if(!value){$("finish-selection").classList.toggle("hidden",true);$("finish-selection").disabled=true;}
   earlyStoppingUI();
   renderDatasetChoices();
 }
@@ -875,8 +877,41 @@ function renderMonitor(view){
   $("progress-track").classList.remove("hidden");$("progress-fill").style.width=percent+"%";
   $("progress-caption").textContent=view.compute+(view.dispatch.job_id?" · Job "+view.dispatch.job_id:"")+(s.stage==="preparing"?" · "+(s.completed||0)+" / "+s.total+" proteins":"");
   if(view.connection_error)$("progress-caption").textContent+=" · Connection interrupted: "+view.connection_error.message;
+  renderFinishSelection(view);
   renderLoss(view.events,view);
   renderMetrics(view);previousView=view;
+}
+function finishSelectionCurrent(request){return connected&&currentRun===request.runID&&datasetConnectionEpoch===request.epoch&&token===request.token;}
+function renderFinishSelection(view){
+  const control=view?.controls?.finish_selection;
+  const eligible=control?.supported===true&&typeof control.available==="boolean"&&typeof control.requested==="boolean"&&view.status?.stage==="training"&&!["completed","failed","cancelled"].includes(view.status?.status);
+  const visible=eligible&&typeof connected!=="undefined"&&connected&&typeof currentRun!=="undefined"&&view.id===currentRun&&(control.available||control.requested);
+  const pending=typeof finishSelectionRequest!=="undefined"&&finishSelectionRequest&&finishSelectionCurrent(finishSelectionRequest);
+  $("finish-selection").classList.toggle("hidden",!visible);
+  $("finish-selection").disabled=!visible||!control.available||control.requested||!!pending;
+  $("finish-selection").textContent=control?.requested===true?"Finishing current pass":"Skip remaining passes";
+}
+async function finishRemainingPasses(){
+  const view=previousView,control=view?.controls?.finish_selection;
+  if(!connected||!currentRun||view?.id!==currentRun||view.status?.stage!=="training"||["completed","failed","cancelled"].includes(view.status?.status)||control?.supported!==true||control.available!==true||control.requested!==false)return;
+  if(finishSelectionRequest&&finishSelectionCurrent(finishSelectionRequest))return;
+  const request={runID:currentRun,epoch:datasetConnectionEpoch,token};
+  finishSelectionRequest=request;renderFinishSelection(view);
+  try{
+    const reply=await api("/api/runs/"+request.runID+"/finish-selection",{});
+    if(!finishSelectionCurrent(request))return;
+    if(reply?.ok!==true||reply?.requested!==true)throw new Error("Request not confirmed");
+    previousView={...previousView,controls:{...previousView.controls,finish_selection:{...control,available:false,requested:true}}};
+    renderFinishSelection(previousView);
+    const latest=await api("/api/runs/"+request.runID);
+    if(finishSelectionCurrent(request))renderMonitor(latest);
+  }catch(error){if(finishSelectionCurrent(request))notice(error.message||"Request failed",true);}
+  finally{
+    if(finishSelectionRequest===request){
+      finishSelectionRequest=null;
+      if(finishSelectionCurrent(request)&&previousView?.id===request.runID)renderFinishSelection(previousView);
+    }
+  }
 }
 async function refreshRun(){if(!currentRun||!connected)return;const view=await api("/api/runs/"+currentRun);renderMonitor(view);}
 function applyWorkspaceState(data){
@@ -970,6 +1005,7 @@ $("launch-run").addEventListener("click",async()=>{
 $("loss-series").addEventListener("change",()=>{selectedLoss=$("loss-series").value;if(previousView)renderLoss(previousView.events);});
 $("loss-metric").addEventListener("change",()=>{if(previousView){selectedLossMetric[lossTaskType(previousView.events,previousView)]=$("loss-metric").value;renderLoss(previousView.events);}});
 $("stop-run").addEventListener("click",async()=>{if(!currentRun)return;try{const result=await api("/api/runs/"+currentRun+"/cancel",{});notice(result.message||"Stop requested");}catch(error){notice(error.message,true);}});
+$("finish-selection").addEventListener("click",finishRemainingPasses);
 
 async function initialize(){
   receivePairingFragment();connectionUI(false);renderCompute();renderRuns();
