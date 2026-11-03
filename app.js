@@ -5,7 +5,7 @@ const localPage = ["localhost","127.0.0.1"].includes(location.hostname);
 const base = localPage ? location.origin : "http://127.0.0.1:8773";
 let token = sessionStorage.getItem("foldguard-service-token") || "";
 let connected = false, profiles = [], runs = [], checks = {}, stores = [], currentRun = null, activeProfile = null;
-let supportedTaskTypes = ["classification"], storageAuthMethods = [];
+let supportedTaskTypes = ["classification"], storageAuthMethods = [], earlyStoppingControl = false;
 let backgroundDatasetImports = false, maxImportBytes = 24*1024**2, datasetFormats = ["csv","tsv"];
 let annotationDialogState = null, selectedComputeID = "", readyValidationID = "", terminalCommandRevision = 0;
 let polling = false, busy = false, selectedLoss = "", previousView = null;
@@ -44,7 +44,13 @@ function connectionUI(value) {
   $("side-status").textContent=value?"Connected":"Disconnected";
   $("launch-run").disabled=!value||busy||importingDatasets>0||!!pendingFiles.train||!!pendingFiles.test||files.train?.kind==="fasta"||files.test?.kind==="fasta"||!selectedCompute()||!readyValidationID;
   $("local-token-tools").classList.toggle("hidden",!localPage||!value);
+  earlyStoppingUI();
   renderDatasetChoices();
+}
+function earlyStoppingUI(){
+  const supported=typeof earlyStoppingControl!=="undefined"&&earlyStoppingControl===true;
+  if(!supported)$("early-stopping").checked=true;
+  $("early-stopping").disabled=!connected||busy||!supported;
 }
 function showConnection() {
   $("service-url").value=base;
@@ -110,6 +116,7 @@ function runMetadata(){
   }
   return {annotation,name:$("run-name").value.trim()||name};
 }
+function runOptions(){return typeof earlyStoppingControl!=="undefined"&&earlyStoppingControl===true?{early_stopping:$("early-stopping").checked===true}:{};}
 function supportsTask(){return taskType()!=="regression"||supportedTaskTypes.includes("regression");}
 function runTaskType(view){return view?.result?.task_type||view?.result?.dataset?.task_type||view?.summary?.task_type||view?.task_type||"classification";}
 function numberText(value,digits=3){
@@ -873,6 +880,7 @@ function renderMonitor(view){
 }
 async function refreshRun(){if(!currentRun||!connected)return;const view=await api("/api/runs/"+currentRun);renderMonitor(view);}
 function applyWorkspaceState(data){
+  earlyStoppingControl=data.capabilities?.early_stopping_control===true;
   backgroundDatasetImports=data.remote_dataset_imports===true;maxImportBytes=backgroundDatasetImports?(Number(data.max_import_bytes)||16*1024**3):24*1024**2;datasetFormats=Array.isArray(data.dataset_formats)?data.dataset_formats:["csv","tsv"];
   $("remote-import-limits").textContent=backgroundDatasetImports?"CSV / TSV / FASTA · "+formatImportBytes(maxImportBytes)+" max":"Connector update required";
   profiles=data.profiles;const nextCompute=preferredCompute(data);if(selectedComputeID&&nextCompute!==selectedComputeID){files.train=null;files.test=null;readyValidationID="";validationRevision++;}selectedComputeID=nextCompute;runs=data.runs;checks=data.checks;stores=data.stores||[];supportedTaskTypes=Array.isArray(data.task_types)?data.task_types:["classification"];storageAuthMethods=Array.isArray(data.storage_auth_methods)?data.storage_auth_methods:[];connectionUI(true);taskTypeHelp();storageCredentialsUI();renderCompute();renderRuns();
@@ -955,7 +963,7 @@ $("launch-run").addEventListener("click",async()=>{
   if(!selectedCompute()||!readyValidationID){notice("Dataset checks pending",true);return;}
   busy=true;connectionUI(true);$("launch-run").textContent="Launching…";clearNotice();
   try{const response=await api("/api/runs",{...datasetPayload(),
-    ...runMetadata(),compute:selectedCompute(),validation_id:readyValidationID});
+    ...runMetadata(),...runOptions(),compute:selectedCompute(),validation_id:readyValidationID});
     currentRun=response.id;previousView=null;selectedLoss="";await refresh();notice("Run launched");}
   catch(error){notice(error.message,true);}finally{busy=false;$("launch-run").innerHTML='Build &amp; evaluate <span>↗</span>';connectionUI(connected);}
 });
