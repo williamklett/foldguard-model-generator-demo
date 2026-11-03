@@ -10,6 +10,8 @@ let backgroundDatasetImports = false, maxImportBytes = 24*1024**2, datasetFormat
 let annotationDialogState = null, selectedComputeID = "", readyValidationID = "", terminalCommandRevision = 0;
 let polling = false, busy = false, selectedLoss = "", previousView = null;
 let finishSelectionRequest = null;
+let stopRunRequest = null;
+let runReadRevision = 0;
 const selectedLossMetric = {classification:"loss",regression:"loss"};
 const files = {train:null,test:null};
 let summaryTimer, renderedResultRun = null, validationRevision = 0;
@@ -46,6 +48,8 @@ function connectionUI(value) {
   $("launch-run").disabled=!value||busy||importingDatasets>0||!!pendingFiles.train||!!pendingFiles.test||files.train?.kind==="fasta"||files.test?.kind==="fasta"||!selectedCompute()||!readyValidationID;
   $("local-token-tools").classList.toggle("hidden",!localPage||!value);
   if(!value){$("finish-selection").classList.toggle("hidden",true);$("finish-selection").disabled=true;}
+  if(!value)$("stop-run").disabled=true;
+  else if(typeof renderStopRun==="function"&&typeof previousView!=="undefined"&&typeof currentRun!=="undefined"&&previousView?.id===currentRun)renderStopRun(previousView);
   earlyStoppingUI();
   renderDatasetChoices();
 }
@@ -899,7 +903,7 @@ function renderMonitor(view){
   $("monitor-name").textContent=view.name;
   $("monitor-message").textContent=s.status==="failed"?(s.message||"Run failed"):({validating:"Checking datasets",dispatching:"Queued",starting:"Starting",preparing:"Preparing",training:"Training",testing:"Evaluating",completed:"Complete",cancelled:"Cancelled"}[s.stage]||s.status);
   $("run-badge").textContent=s.status;$("run-badge").className="pill "+s.status;
-  $("stop-run").classList.toggle("hidden",["completed","failed","cancelled"].includes(s.status));
+  renderStopRun(view);
   const stages=["validating","starting","preparing","training","testing","completed"],index=stages.indexOf(s.stage);
   [...$("pipeline-steps").children].forEach((el,i)=>{const current=i===0?index>=0&&index<=2:i===1?index===3:index>=4;const done=i===0?index>2:i===1?index>3:completed;el.classList.toggle("active",current);el.classList.toggle("done",done);});
   let percent=completed?100:s.stage==="preparing"?5+55*(s.completed||0)/(s.total||1):s.stage==="training"?75:s.stage==="testing"?95:2;
@@ -909,6 +913,42 @@ function renderMonitor(view){
   renderFinishSelection(view);
   renderLoss(view.events,view);
   renderMetrics(view);previousView=view;
+}
+function runRequestCurrent(request){return connected&&currentRun===request.runID&&datasetConnectionEpoch===request.epoch&&token===request.token;}
+function runReadCurrent(request){return runRequestCurrent(request)&&request.readRevision===runReadRevision;}
+function renderStopRun(view){
+  const terminal=["completed","failed","cancelled"].includes(view.status?.status);
+  const selected=typeof currentRun==="undefined"||view.id===currentRun,online=typeof connected==="undefined"||connected;
+  const pending=typeof stopRunRequest!=="undefined"&&stopRunRequest&&runRequestCurrent(stopRunRequest);
+  $("stop-run").classList.toggle("hidden",terminal);
+  $("stop-run").disabled=terminal||!selected||!online||!!pending;
+  $("stop-run").textContent=pending?"Stopping…":"Stop run";
+}
+async function stopCurrentRun(){
+  const view=previousView;
+  if(!connected||!currentRun||view?.id!==currentRun||["completed","failed","cancelled"].includes(view.status?.status))return;
+  if(stopRunRequest&&runRequestCurrent(stopRunRequest))return;
+  const request={runID:currentRun,epoch:datasetConnectionEpoch,token};
+  stopRunRequest=request;renderStopRun(view);
+  let acknowledged=false;
+  try{
+    const reply=await api("/api/runs/"+request.runID+"/cancel",{});
+    if(!runRequestCurrent(request))return;
+    if(reply?.ok!==true)throw new Error("Stop request not confirmed");
+    acknowledged=true;notice(typeof reply.message==="string"&&reply.message.trim()?reply.message:"Stop requested");
+    request.readRevision=++runReadRevision;
+    const latest=await api("/api/runs/"+request.runID,undefined,{timeout:15000});
+    if(runReadCurrent(request)){
+      if(latest?.id!==request.runID)throw new Error("Run status did not match the requested run");
+      renderMonitor(latest);
+    }
+  }catch(error){if(runRequestCurrent(request)&&(request.readRevision===undefined||runReadCurrent(request)))notice((acknowledged?"Stop requested · ":"")+(error.message||"Stop request failed"),true);}
+  finally{
+    if(stopRunRequest===request){
+      stopRunRequest=null;
+      if(runRequestCurrent(request)&&previousView?.id===request.runID)renderStopRun(previousView);
+    }
+  }
 }
 function finishSelectionCurrent(request){return connected&&currentRun===request.runID&&datasetConnectionEpoch===request.epoch&&token===request.token;}
 function renderFinishSelection(view){
@@ -942,7 +982,16 @@ async function finishRemainingPasses(){
     }
   }
 }
-async function refreshRun(){if(!currentRun||!connected)return;const view=await api("/api/runs/"+currentRun);renderMonitor(view);}
+async function refreshRun(){
+  if(!currentRun||!connected)return;
+  const request={runID:currentRun,epoch:datasetConnectionEpoch,token,readRevision:++runReadRevision};
+  let view;
+  try{view=await api("/api/runs/"+request.runID,undefined,{timeout:15000});}
+  catch(error){if(runReadCurrent(request))throw error;return;}
+  if(!runReadCurrent(request))return;
+  if(view?.id!==request.runID)throw new Error("Run status did not match the requested run");
+  renderMonitor(view);
+}
 function applyWorkspaceState(data){
   earlyStoppingControl=data.capabilities?.early_stopping_control===true;
   backgroundDatasetImports=data.remote_dataset_imports===true;maxImportBytes=backgroundDatasetImports?(Number(data.max_import_bytes)||16*1024**3):24*1024**2;datasetFormats=Array.isArray(data.dataset_formats)?data.dataset_formats:["csv","tsv"];
@@ -954,8 +1003,13 @@ function applyWorkspaceState(data){
 }
 async function refresh(){
   if(polling||!token)return;polling=true;
-  try{const data=await api("/api/state",undefined,{timeout:15000});applyWorkspaceState(data);await refreshRun();}
-  catch(error){connectionUI(false);if(currentRun)$("progress-caption").textContent="Connector disconnected · Reconnect";}
+  try{
+    try{const data=await api("/api/state",undefined,{timeout:15000});applyWorkspaceState(data);}
+    catch(error){connectionUI(false);if(currentRun)$("progress-caption").textContent="Connector disconnected · Reconnect";return;}
+    const request={runID:currentRun,epoch:datasetConnectionEpoch,token};
+    try{await refreshRun();}
+    catch(error){if(runRequestCurrent(request))$("progress-caption").textContent="Run status unavailable · "+(error.message||"Retrying");}
+  }
   finally{polling=false;}
 }
 
@@ -1034,7 +1088,7 @@ $("launch-run").addEventListener("click",async()=>{
 });
 $("loss-series").addEventListener("change",()=>{selectedLoss=$("loss-series").value;if(previousView)renderLoss(previousView.events);});
 $("loss-metric").addEventListener("change",()=>{if(previousView){selectedLossMetric[lossTaskType(previousView.events,previousView)]=$("loss-metric").value;renderLoss(previousView.events);}});
-$("stop-run").addEventListener("click",async()=>{if(!currentRun)return;try{const result=await api("/api/runs/"+currentRun+"/cancel",{});notice(result.message||"Stop requested");}catch(error){notice(error.message,true);}});
+$("stop-run").addEventListener("click",stopCurrentRun);
 $("finish-selection").addEventListener("click",finishRemainingPasses);
 
 async function initialize(){
